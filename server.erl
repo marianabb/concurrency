@@ -23,37 +23,53 @@ initialize() ->
     Initialvals = [{a,0},{b,0},{c,0},{d,0}], %% All variables are set to 0
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
-    server_loop([],StorePid).
+    TSGenerator = counter:start(),
+    server_loop(dict:new(),StorePid, TSGenerator, gb_trees:empty()).
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% - The server maintains a list of all connected clients and a store holding
 %% the values of the global variable a, b, c and d 
-server_loop(ClientList,StorePid) ->
+server_loop(Clients,StorePid,TSGenerator,Transactions) ->
     receive
 	{login, MM, Client} -> 
+	    % Client login
 	    MM ! {ok, self()},
-	    io:format("New client has joined the server:~p.~n", [Client]),
+	    io:format("New client has joined the server: ~p.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(add_client(Client,ClientList),StorePid);
+	    server_loop(dict:store(Client,0,Clients),StorePid,TSGenerator,Transactions);
 	{close, Client} -> 
-	    io:format("Client~p has left the server.~n", [Client]),
+	    % Client logout
+	    io:format("Client ~p has left the server.~n", [Client]),
 	    StorePid ! {print, self()},
-	    server_loop(remove_client(Client,ClientList),StorePid);
+	    server_loop(dict:erase(Client,Clients),StorePid,TSGenerator,Transactions);
 	{request, Client} -> 
+	    % A transaction is started.
+	    % The user enters the run command in the client window. 
+	    % This is marked by sending a request to the server.
+	    TS = counter:value(TSGenerator), 
+	    counter:increment(TSGenerator),  
+	    ClientsUpdated = dict:store(Client,TS,Clients),
+	    TransactionsUpdated = gb_trees:insert(TS,{Client,'going-on'},Transactions),
+	    io:format("Client ~p has began transaction ~p .~n", [Client, TS]),
 	    Client ! {proceed, self()},
-	    server_loop(ClientList,StorePid);
-	{confirm, Client} -> 
-	    Client ! {abort, self()},
-	    server_loop(ClientList,StorePid);
+	    server_loop(ClientsUpdated,StorePid,TSGenerator,TransactionsUpdated);
 	{action, Client, Act} ->
-	    io:format("Received~p from client~p.~n", [Act, Client]),
-	    server_loop(ClientList,StorePid)
+	    % The client sends the actions of the list (the transaction) one by one 
+	    % in the order they were entered by the user.
+	    io:format("Received ~p from client ~p in transacion ~p.~n", [Act, Client, dict:fetch(Client,Clients)]),
+	    server_loop(Clients,StorePid,TSGenerator,Transactions);
+	{confirm, Client} -> 
+	    % Once, all the actions are sent, the client sends a confirm message 
+	    % and waits for the server reply.
+	    io:format("Client ~p has ended transaction ~p .~n", [Client, dict:fetch(Client,Clients)]),
+	    Client ! {abort, self()},
+	    server_loop(Clients,StorePid,TSGenerator,Transactions)
     after 50000 ->
-	case all_gone(ClientList) of
+	case all_gone(Clients) of
 	    true -> exit(normal);    
-	    false -> server_loop(ClientList,StorePid)
+	    false -> server_loop(Clients,StorePid,TSGenerator,Transactions)
 	end
     end.
 
@@ -69,11 +85,11 @@ store_loop(ServerPid, Database) ->
 
 
 %% - Low level function to handle lists
-add_client(C,T) -> [C|T].
+%% add_client(C,T) -> [C|T].
 
-remove_client(_,[]) -> [];
-remove_client(C, [C|T]) -> T;
-remove_client(C, [H|T]) -> [H|remove_client(C,T)].
+%% remove_client(_,[]) -> [];
+%% remove_client(C, [C|T]) -> T;
+%% remove_client(C, [H|T]) -> [H|remove_client(C,T)].
 
 all_gone([]) -> true;
 all_gone(_) -> false.
