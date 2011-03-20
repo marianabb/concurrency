@@ -84,11 +84,12 @@ server_loop(Clients,StorePid,ObjectsMgrPid,TSGenerator,Transactions) ->
 				    false ->
 					io:format("\t\t\tWait until the transaction that made version ~p of '~w' commits or aborts.~n", [DSelected, Var])
 				        %Client blocks, but server should not block!
-				end,
+				end,				
 				Transactions; %no change on transactions
 			    false ->
 				io:format("\t\tNot valid~n"),
 				io:format("\t\t\tRead on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
+				Client ! {abort, self()},
 				gb_trees:delete(Tc,Transactions) %the transaction is over
 			end;
 		    {write,Var,Value} -> 
@@ -107,7 +108,9 @@ server_loop(Clients,StorePid,ObjectsMgrPid,TSGenerator,Transactions) ->
 					ObjectsMgrPid ! {updateObject, Var, 
 							 {Val, WTS, RTS, gb_trees:update(Tc, Value, Versions)}}
 				end,
-				Transactions; %no change on transactions
+				{value, {Client,State,WriteOps}} = gb_trees:lookup(Tc, Transactions),
+				TransactionsUpdt = gb_trees:update(Tc, {Client,State,sets:add_element(Var,WriteOps)}, Transactions), %keep wich variables i have to commit with the transaction
+				TransactionsUpdt; %no change on transactions
 			    false ->
 				io:format("\t\tNot valid~n"),
 				io:format("\t\t\t Write on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
