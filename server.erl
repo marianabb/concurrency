@@ -13,10 +13,10 @@
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 start() -> 
     register(transaction_server, spawn(fun() ->
-					       process_flag(trap_exit, true),
-					       Val= (catch initialize()),
-					       io:format("Server terminated with:~p~n",[Val])
-				       end)).
+                                               process_flag(trap_exit, true),
+                                               Val= (catch initialize()),
+                                               io:format("Server terminated with:~p~n",[Val])
+                                       end)).
 
 initialize() ->
     process_flag(trap_exit, true),
