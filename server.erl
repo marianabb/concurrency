@@ -37,93 +37,94 @@ initialize() ->
 %% the values of the global variable a, b, c and d 
 server_loop(Clients,StorePid,ObjectsMgrPid,TSGenerator,Transactions) ->
     receive
-        {login, MM, Client} -> 
-                                                % Client login
-            MM ! {ok, self()},
-            io:format("New client has joined the server: ~p.~n", [Client]),
-            StorePid ! {print, self()},
-            ObjectsMgrPid ! {print, self()},
-            server_loop(dict:store(Client,0,Clients),StorePid,ObjectsMgrPid,TSGenerator,Transactions);
-        {close, Client} -> 
-                                                % Client logout
-            io:format("Client ~p has left the server.~n", [Client]),
-            StorePid ! {print, self()},
-            server_loop(dict:erase(Client,Clients),StorePid,ObjectsMgrPid,TSGenerator,Transactions);
-        {request, Client} -> 
-                                                % A transaction is started.
-                                                % The user enters the run command in the client window. 
-                                                % This is marked by sending a request to the server.
-            TS = counter:value(TSGenerator), 
-            counter:increment(TSGenerator),  
-            ClientsUpdated = dict:store(Client,TS,Clients),
-            TransactionsUpdated = gb_trees:insert(TS,{Client,'going-on',sets:new()},Transactions),
-            io:format("Client ~p has began transaction ~p .~n", [Client, TS]),
-            Client ! {proceed, self()},
-            server_loop(ClientsUpdated,StorePid,ObjectsMgrPid,TSGenerator,TransactionsUpdated);
-        {action, Client, Act} ->
-                                                % The client sends the actions of the list (the transaction) one by one 
-                                                % in the order they were entered by the user.
-            Tc = dict:fetch(Client,Clients),
-            io:format("Received ~p from client ~p in transacion ~p.~n", [Act, Client, Tc]),
-            TransactionsUpdated = 
-                case Act of 
-                    {read,Var} -> 
-                        io:format("\tValidating read rule~n"),
-                        ObjectsMgrPid ! {getObject,Var},
-                        {Val, WTS, _, Versions} = receive {object, O} -> O end,
-                        case Tc > WTS of
-                            true ->
-                                io:format("\t\tValid~n"),
-                                DSelected = maxLeqList(Tc, gb_trees:keys(Versions)),
-                                case DSelected =:= WTS of
-                                    true ->
-                                        io:format("\t\t\tPerform read operation of ~p in version ~p of ~p~n",
-                                                  [Tc, DSelected,Var]),		
-                                        ObjectsMgrPid ! {updateObject, Var, 
-                                                         {Val, WTS, Tc, Versions}}, %update read timestamp
-                                        io:format("\t\t\tClient ~p reads ~p = ~p~n",[Tc, Var, Val]);				    
-                                    false ->
-                                        io:format("\t\t\tWait until the transaction that made version ~p of '~w' commits or aborts.~n", 
-                                                  [DSelected, Var])
-                                                %Client blocks, but server should not block!
-                                end,
-                                Transactions; %no change on transactions
-                            false ->
-                                io:format("\t\tNot valid~n"),
-                                io:format("\t\t\tRead on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
-                                gb_trees:delete(Tc,Transactions) %the transaction is over
-                        end;
-                    {write,Var,Value} -> 
-                        io:format("\tValidating write rule~n"),
-                        ObjectsMgrPid ! {getObject,Var},
-                        {Val, WTS, RTS, Versions} = receive {object, O} -> O end,
-                        case ((Tc >= RTS) and (Tc > WTS)) of
-                            true ->
-                                io:format("\t\t Valid~n"),
-                                io:format("\t\t\t Perform write operation of ~p in ~p ~n",[Tc, Var]),
-                                case gb_trees:lookup(Tc,Versions) of
-                                    none ->
-                                        ObjectsMgrPid ! {updateObject, Var, 
-                                                         {Val, WTS, RTS, gb_trees:enter(Tc, Value, Versions)}};
-                                    {value, _} ->
-                                        ObjectsMgrPid ! {updateObject, Var, 
-                                                         {Val, WTS, RTS, gb_trees:update(Tc, Value, Versions)}}
-                                end,
-                                Transactions; %no change on transactions
-                            false ->
-                                io:format("\t\tNot valid~n"),
-                                io:format("\t\t\t Write on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
-                                Client ! {abort, self()},
-                                gb_trees:delete(Tc,Transactions) %the transaction is over
-                        end
-                end,
-            server_loop(Clients,StorePid,ObjectsMgrPid,TSGenerator,TransactionsUpdated);
-        {confirm, Client} -> 
-                                                % Once, all the actions are sent, the client sends a confirm message 
-                                                % and waits for the server reply.
-            io:format("Client ~p has ended transaction ~p .~n", [Client, dict:fetch(Client,Clients)]),
-            Client ! {abort, self()},
-            server_loop(Clients,StorePid,ObjectsMgrPid,TSGenerator,Transactions)
+	{login, MM, Client} -> 
+	    % Client login
+	    MM ! {ok, self()},
+	    io:format("New client has joined the server: ~p.~n", [Client]),
+	    StorePid ! {print, self()},
+	    ObjectsMgrPid ! {print, self()},
+	    server_loop(dict:store(Client,0,Clients),StorePid,ObjectsMgrPid,TSGenerator,Transactions);
+	{close, Client} -> 
+	    % Client logout
+	    io:format("Client ~p has left the server.~n", [Client]),
+	    StorePid ! {print, self()},
+	    server_loop(dict:erase(Client,Clients),StorePid,ObjectsMgrPid,TSGenerator,Transactions);
+	{request, Client} -> 
+	    % A transaction is started.
+	    % The user enters the run command in the client window. 
+	    % This is marked by sending a request to the server.
+	    TS = counter:value(TSGenerator), 
+	    counter:increment(TSGenerator),  
+	    ClientsUpdated = dict:store(Client,TS,Clients),
+	    TransactionsUpdated = gb_trees:insert(TS,{Client,'going-on',sets:new()},Transactions),
+	    io:format("Client ~p has began transaction ~p .~n", [Client, TS]),
+	    Client ! {proceed, self()},
+	    server_loop(ClientsUpdated,StorePid,ObjectsMgrPid,TSGenerator,TransactionsUpdated);
+	{action, Client, Act} ->
+	    % The client sends the actions of the list (the transaction) one by one 
+	    % in the order they were entered by the user.
+	    Tc = dict:fetch(Client,Clients),
+	    io:format("Received ~p from client ~p in transacion ~p.~n", [Act, Client, Tc]),
+	    TransactionsUpdated = 
+		case Act of 
+		    {read,Var} -> 
+			io:format("\tValidating read rule~n"),
+			ObjectsMgrPid ! {getObject,Var},
+			{Val, WTS, _, Versions} = receive {object, O} -> O end,
+			case Tc > WTS of
+			    true ->
+				io:format("\t\tValid~n"),
+				DSelected = maxLeqList(Tc, gb_trees:keys(Versions)),
+				case DSelected =:= WTS of
+				    true ->
+					io:format("\t\t\tPerform read operation of ~p in version ~p of ~p~n",[Tc, DSelected,Var]),					
+					ObjectsMgrPid ! {updateObject, Var, 
+							 {Val, WTS, Tc, Versions}}, %update read timestamp
+					io:format("\t\t\tClient ~p reads ~p = ~p~n",[Tc, Var, Val]);				    
+				    false ->
+					io:format("\t\t\tWait until the transaction that made version ~p of '~w' commits or aborts.~n", [DSelected, Var])
+				        %Client blocks, but server should not block!
+				end,				
+				Transactions; %no change on transactions
+			    false ->
+				io:format("\t\tNot valid~n"),
+				io:format("\t\t\tRead on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
+				Client ! {abort, self()},
+				gb_trees:delete(Tc,Transactions) %the transaction is over
+			end;
+		    {write,Var,Value} -> 
+			io:format("\tValidating write rule~n"),
+			ObjectsMgrPid ! {getObject,Var},
+			{Val, WTS, RTS, Versions} = receive {object, O} -> O end,
+			case ((Tc >= RTS) and (Tc > WTS)) of
+			    true ->
+				io:format("\t\t Valid~n"),
+				io:format("\t\t\t Perform write operation of ~p in ~p ~n",[Tc, Var]),
+				case gb_trees:lookup(Tc,Versions) of
+				    none ->
+					ObjectsMgrPid ! {updateObject, Var, 
+							 {Val, WTS, RTS, gb_trees:enter(Tc, Value, Versions)}};
+				    {value, _} ->
+					ObjectsMgrPid ! {updateObject, Var, 
+							 {Val, WTS, RTS, gb_trees:update(Tc, Value, Versions)}}
+				end,
+				{value, {Client,State,WriteOps}} = gb_trees:lookup(Tc, Transactions),
+				TransactionsUpdt = gb_trees:update(Tc, {Client,State,sets:add_element(Var,WriteOps)}, Transactions), %keep wich variables i have to commit with the transaction
+				TransactionsUpdt; %no change on transactions
+			    false ->
+				io:format("\t\tNot valid~n"),
+				io:format("\t\t\t Write on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
+				Client ! {abort, self()},
+				gb_trees:delete(Tc,Transactions) %the transaction is over
+		    end
+	    end,
+	    server_loop(Clients,StorePid,ObjectsMgrPid,TSGenerator,TransactionsUpdated);
+	{confirm, Client} -> 
+	    % Once, all the actions are sent, the client sends a confirm message 
+	    % and waits for the server reply.
+	    io:format("Client ~p has ended transaction ~p .~n", [Client, dict:fetch(Client,Clients)]),
+	    Client ! {abort, self()},
+	    server_loop(Clients,StorePid,ObjectsMgrPid,TSGenerator,Transactions)
     after 50000 ->
             case all_gone(Clients) of
                 true -> exit(normal);    
