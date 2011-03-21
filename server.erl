@@ -43,14 +43,18 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
     % Depending on the previous status received in Last_Event we must check the Waiting tree
     case Last_Event > 0 of
         true -> 
+            io:format("-WaitCheck: Last transaction ~p was committed/aborted~n", [Last_Event]),
             % Request the queue corresponding to Last_Event to the wait manager
             WaitMgrPid ! {getFirst, Last_Event},
             receive 
                 % The Transaction has no one waiting for it
                 {no_waiting} ->
+                    io:format("-WaitCheck: No one is waiting for ~p~n", [Last_Event]),
                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,0);
                 % There are actions waiting for Last_Event in the queue
                 {first, {Client_Q, Tc_Q, Act_Q}} -> 
+                    io:format("-WaitCheck: First action in queue for ~p is {Client, Tc, Act}={~p, ~p, ~p}~n", 
+                              [Last_Event,Client_Q, Tc_Q, Act_Q]),
                     % Delete (Tc, Last_Event) from Waiting_Ts
                     WaitMgrPid ! {deleteWait, {Tc_Q, Last_Event}},
                     % Apply the action and continue with the queue
@@ -62,13 +66,18 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
                                 do_write(ObjectsMgrPid, Tc_Q, Var_Q, Value_Q, Transactions)
                         end,
                     % If the action failed, send abort to the client
-                    case Status_Q of
+                    case Status_Q of 
                         abort ->
+                            io:format("-WaitCheck: Action failed - Aborting~n"),
+                            %If Tc_Q aborts but has more actions in the queue it must be managed
+                            WaitMgrPid ! {manageAbort, {Last_Event, Client_Q}},
                             Client_Q ! {abort, self()}
                     end,
                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated_Q,Last_Event);
                 % The queue is now empty, the element has been deleted by the Wait Manager.
                 {empty_queue} ->
+                    io:format("-WaitCheck: The action queue for ~p is now empty~n", [Last_Event]),
+                    io:format("-WaitCheck: Resuming normal behaviour~n"),
                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,0)
             end
     end,
@@ -243,17 +252,20 @@ object_manager(ServerPid, Objects) ->
 wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
     receive
         {print, ServerPid} ->
-            io:format("Waiting actions:~n~p.~n", [Queue_Tree]); %TO-DO verify if this prints correctly
+            io:format("--WaitManager: Queue Tree: ~p.~n", [Queue_Tree]); %TO-DO verify if this prints correctly
 
         % Checks if a Transaction can proceed or must wait for another to commit/abort.
         % If it must wait, it enqueues the trasaction.
         {checkT, {Client, Tc, Act}} ->
+            io:format("--WaitManager: Received checkT for {Client, Tc, Act}={~p, ~p, ~p}~n", [Client, Tc, Act]),
             % Look for Tc in Waiting_Ts
             case gb_trees:lookup(Tc, Waiting_Ts) of
                 none ->
+                    io:format("--WaitManager: Transaction ~p can proceed~n", [Tc]),
 					ServerPid ! {proceed},
                     wait_manager(ServerPid, Queue_Tree, Waiting_Ts);
                 {value, Tw} ->
+                    io:format("--WaitManager: Transaction ~p must wait for ~p~n", [Tc, Tw]),
                     % Enqueue the action in Tw's queue
                     Queue = gb_trees:get(Tw, Queue_Tree),
                     Updated_Q_Tree = gb_trees:enter(Tw, queue:in({Client, Tc, Act}, Queue)),
@@ -262,6 +274,7 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
             end;
         % Inserts a transaction on the corresponding queue in Queue_Tree
         {insertT, {Client, Tc, Act, Tw}} ->
+            io:format("--WaitManager: Received insertT for {Client, Tc, Act, Tw}={~p, ~p, ~p, ~p}~n", [Client,Tc,Act,Tw]),
             % Insert Tc in Waiting_Ts waiting for Tw
             % Note: It should not be possible for Tc to be in the tree
             Updated_Waiting_Ts = gb_trees:insert(Tc, Tw, Waiting_Ts), %TO-DO perhaps try-catch just in case
@@ -269,8 +282,10 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
             % Look for Tw in Queue_Tree
             case gb_trees:lookup(Tw, Queue_Tree) of
                 none ->
+                    io:format("--WaitManager: Creating new queue for ~p~n", [Tw]),
                     New_Q = queue:new();
                 {value, Tw_Queue} ->
+                    io:format("--WaitManager: Queue for ~p already exists: Updating~n", [Tw]),
                     New_Q = Tw_Queue
             end,
             Updated_Q_Tree = gb_trees:insert(Tw, queue:in({Client, Tc, Act}, New_Q)),
@@ -279,32 +294,51 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
         % Returns the first element from the queue of Tw in Queue_Tree or 'empty_queue' if the queue is empty
         % Note: If the queue is empty it deletes the element from the tree
         {getFirst, Tw} ->
+            io:format("--WaitManager: Received getFirst for Tw = ~p~n", [Tw]),
             case gb_trees:lookup(Tw, Queue_Tree) of
                 {value, Q} ->
+                    io:format("--WaitManager: The queue for ~p exists with length ~p~n", [Tw, queue:len(Q)]),
                     case queue:out(Q) of
                         {{value,First}, Q2} -> % First contains {Client, Tc, Act}
+                            io:format("--WaitManager: First value of queue for ~p is {Client, Tc, Act}=~p~n", [Tw, First]),
                             % Update the queue
                             Updated_Q_Tree = gb_trees:enter(Tw, Q2),
                             ServerPid ! {first, First},
                             wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts);
                         % If the queue is empty, remove the element from the tree
                         {empty, _} ->
+                            io:format("--WaitManager: The queue for ~p is empty~n", [Tw]),
                             Updated_Q_Tree = gb_trees:delete(Tw, Queue_Tree),
                             ServerPid ! {empty_queue},
                             wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts)
                     end;
                 none ->
+                    io:format("--WaitManager: The queue for ~p does not exist~n", [Tw]),
                     ServerPid ! {no_waiting}
             end,
             wait_manager(ServerPid, Queue_Tree, Waiting_Ts);
         % Delete (Tc, Tw) from Waiting_Ts
         {deleteWait, {Tc, Tw}} ->
+            io:format("--WaitManager: Received deleteWait for {Tc, Tw} = {~p, ~p}~n", [Tc, Tw]),
             case gb_tree:lookup(Tc, Waiting_Ts) of
                 % Delete ONLY if value is the same as Tw! TO-DO: Check if this works as expected
                 {value, Tw} ->
+                    io:format("--WaitManager: Exact match {Tc, Tw}={~p, ~p} found. Deleting~n", [Tc, Tw]),
                     Updated_Waiting_Ts = gb_tree:delete(Tc, Waiting_Ts),
                     wait_manager(ServerPid, Queue_Tree, Updated_Waiting_Ts)
                     %TO-DO Perhaps send a 'success' message?
+            end,
+            wait_manager(ServerPid, Queue_Tree, Waiting_Ts);
+        % The transaction was aborted. All actions that belong to it must be deleted from Queue_Tree
+        {manageAbort, {Tw, Client}} ->
+            io:format("--WaitManager: Received manageAbort for {Tw, Client} = {~p, ~p}~n", [Tw, Client]),
+            case gb_trees:lookup(Tw, Queue_Tree) of
+                {value, Q} ->
+                    io:format("--WaitManager: Initial Q length: ~p~n", [queue:len(Q)]),
+                    L = del_all_client(Client, queue:to_list(Q)),
+                    io:format("--WaitManager: Final Q length: ~p~n", [length(L)]),
+                    Updated_Q_Tree = gb_trees:enter(Tw, queue:from_list(L)),
+                    wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts)
             end,
             wait_manager(ServerPid, Queue_Tree, Waiting_Ts)
     end.
@@ -319,12 +353,12 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
 %% remove_client(C, [C|T]) -> T;
 %% remove_client(C, [H|T]) -> [H|remove_client(C,T)].
 
-                                                % find the maximun value leq than X in an ordered list
+%% Find the maximun value leq than X in an ordered list
 maxLeqList(_, []) ->
-                                                %none;
+    %none;
     0; %intial version
 maxLeqList(X, [H|T]) ->
-                                                %    maxLeqList_aux(X, none, [H|T]).
+    %    maxLeqList_aux(X, none, [H|T]).
     maxLeqList_aux(X, 0, [H|T]).
 
 maxLeqList_aux(_, MaxLeqSoFar, []) ->
@@ -340,3 +374,8 @@ maxLeqList_aux(X, MaxLeqSoFar, [H|T]) ->
 
 all_gone([]) -> true;
 all_gone(_) -> false.
+
+
+%% Deletes all element in the list where C is the client
+del_all_client(C, List) ->
+  [{Client, Tc, Act} || {Client, Tc, Act} <- List, Client =/= C].
