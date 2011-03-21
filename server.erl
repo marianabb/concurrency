@@ -41,32 +41,37 @@ initialize() ->
 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Last_Event) ->
     
     % Depending on the previous status received in Last_Event we must check the Waiting tree
-%%     case Last_Event > 0 of
-%%         true -> 
-%%             % Request the queue corresponding to Last_Event to the wait manager
-%%             WaitMgrPid ! {getFirst, Last_Event},
-%%             receive 
-%%                 % The Transaction has no one waiting for it
-%%                 {no_waiting} ->
-%%                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,0);
-%%                 % There are actions waiting for Last_Event in the queue
-%%                 {first, {Tc, Act}} -> 
-%%                     % Delete (Tc, Last_Event) from Waiting_Ts
-%%                     WaitMgrPid ! {deleteWait, {Tc, Last_Event}},
-%%                     % Apply the action and continue with the queue
-%%                     TransactionsUpdated =
-%%                         case Act of 
-%%                             {read,Var} -> 
-%%                                 do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions, Client);
-%%                             {write,Var,Value} -> 
-%%                                 do_write(ObjectsMgrPid, Tc, Var, Value, Transactions, Client)
-%%                         end,
-%%                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated,Last_Event);
-%%                 % The queue is now empty, the element has been deleted by the Wait Manager.
-%%                 {empty_queue} ->
-%%                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,0)
-%%             end
-%%     end,
+    case Last_Event > 0 of
+        true -> 
+            % Request the queue corresponding to Last_Event to the wait manager
+            WaitMgrPid ! {getFirst, Last_Event},
+            receive 
+                % The Transaction has no one waiting for it
+                {no_waiting} ->
+                    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,0);
+                % There are actions waiting for Last_Event in the queue
+                {first, {Client_Q, Tc_Q, Act_Q}} -> 
+                    % Delete (Tc, Last_Event) from Waiting_Ts
+                    WaitMgrPid ! {deleteWait, {Tc_Q, Last_Event}},
+                    % Apply the action and continue with the queue
+                    {TransactionsUpdated_Q, Status_Q} =
+                        case Act_Q of 
+                            {read,Var_Q} -> 
+                                do_read(ObjectsMgrPid, WaitMgrPid, Tc_Q, Var_Q, Transactions);
+                            {write,Var_Q,Value_Q} -> 
+                                do_write(ObjectsMgrPid, Tc_Q, Var_Q, Value_Q, Transactions)
+                        end,
+                    % If the action failed, send abort to the client
+                    case Status_Q of
+                        abort ->
+                            Client_Q ! {abort, self()}
+                    end,
+                    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated_Q,Last_Event);
+                % The queue is now empty, the element has been deleted by the Wait Manager.
+                {empty_queue} ->
+                    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,0)
+            end
+    end,
     
     receive
 	{login, MM, Client} -> 
@@ -105,13 +110,18 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
                 % continue loop without changes to Transactions
                 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Last_Event);    
             {proceed} ->                            
-                TransactionsUpdated = %TO-DO consider return {TransactionsUp, Last_Event} if L_E was commit/abort
+                {TransactionsUpdated, Status} =
                     case Act of 
                         {read,Var} -> 
-                            do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions, Client);
+                            do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions);
                         {write,Var,Value} -> 
-                            do_write(ObjectsMgrPid, Tc, Var, Value, Transactions, Client)
+                            do_write(ObjectsMgrPid, Tc, Var, Value, Transactions)
                     end,
+                % If the action failed, send abort to the client
+                case Status of
+                    abort ->
+                        Client ! {abort, self()}
+                end,
                 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated,Last_Event)
         end;
 	{confirm, Client} -> 
@@ -141,7 +151,7 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
     end.
 
 %% - Read function
-do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions, Client) ->
+do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions) ->
     io:format("\tValidating read rule~n"),
     ObjectsMgrPid ! {getObject,Var},
     {Val, WTS, _, Versions} = receive {object, O} -> O end,
@@ -168,16 +178,15 @@ do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions, Client) ->
                                       [Tc, DSelected])
                     end
             end,				
-            Transactions; %no change on transactions
+            {Transactions, continue}; %no change on transactions
         false ->
             io:format("\t\tNot valid~n"),
             io:format("\t\t\tRead on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
-            Client ! {abort, self()}, %TO-DO perhaps send abort to server_loop instead
-            gb_trees:delete(Tc,Transactions) %the transaction is over
+            {gb_trees:delete(Tc,Transactions), abort} %the transaction is over
     end.
 
 %% - Write function
-do_write(ObjectsMgrPid, Tc, Var, Value, Transactions, Client) ->
+do_write(ObjectsMgrPid, Tc, Var, Value, Transactions) ->
     io:format("\tValidating write rule~n"),
     ObjectsMgrPid ! {getObject,Var},
     {Val, WTS, RTS, Versions} = receive {object, O} -> O end,
@@ -196,12 +205,11 @@ do_write(ObjectsMgrPid, Tc, Var, Value, Transactions, Client) ->
             {value, {Client,State,WriteOps}} = gb_trees:lookup(Tc, Transactions),
             %keep wich variables i have to commit with the transaction
             TransactionsUpdt = gb_trees:update(Tc, {Client,State,sets:add_element(Var,WriteOps)}, Transactions), 
-            TransactionsUpdt; %no change on transactions
+            {TransactionsUpdt, continue};
         false ->
             io:format("\t\tNot valid~n"),
             io:format("\t\t\t Write on ~p is too late! Abort transaction ~p .~n", [Var, Tc]),
-            Client ! {abort, self()}, % TO-DO perhaps send abort to server_loop instead
-            gb_trees:delete(Tc,Transactions) %the transaction is over
+            {gb_trees:delete(Tc,Transactions), abort} %the transaction is over
     end.
 
 
@@ -239,7 +247,7 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
 
         % Checks if a Transaction can proceed or must wait for another to commit/abort.
         % If it must wait, it enqueues the trasaction.
-        {checkT, {Tc, Act}} ->
+        {checkT, {Client, Tc, Act}} ->
             % Look for Tc in Waiting_Ts
             case gb_trees:lookup(Tc, Waiting_Ts) of
                 none ->
@@ -248,12 +256,12 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
                 {value, Tw} ->
                     % Enqueue the action in Tw's queue
                     Queue = gb_trees:get(Tw, Queue_Tree),
-                    Updated_Q_Tree = gb_trees:enter(Tw, queue:in({Tc,Act}, Queue)),
+                    Updated_Q_Tree = gb_trees:enter(Tw, queue:in({Client, Tc, Act}, Queue)),
                     ServerPid ! {must_wait},
                     wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts)
             end;
         % Inserts a transaction on the corresponding queue in Queue_Tree
-        {insertT, {Tc, Act, Tw}} ->
+        {insertT, {Client, Tc, Act, Tw}} ->
             % Insert Tc in Waiting_Ts waiting for Tw
             % Note: It should not be possible for Tc to be in the tree
             Updated_Waiting_Ts = gb_trees:insert(Tc, Tw, Waiting_Ts), %TO-DO perhaps try-catch just in case
@@ -265,7 +273,7 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
                 {value, Tw_Queue} ->
                     New_Q = Tw_Queue
             end,
-            Updated_Q_Tree = gb_trees:insert(Tw, queue:in({Tc, Act}, New_Q)),
+            Updated_Q_Tree = gb_trees:insert(Tw, queue:in({Client, Tc, Act}, New_Q)),
             ServerPid ! {inserted},
             wait_manager(ServerPid, Updated_Q_Tree, Updated_Waiting_Ts);
         % Returns the first element from the queue of Tw in Queue_Tree or 'empty_queue' if the queue is empty
@@ -274,7 +282,7 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
             case gb_trees:lookup(Tw, Queue_Tree) of
                 {value, Q} ->
                     case queue:out(Q) of
-                        {{value,First}, Q2} ->
+                        {{value,First}, Q2} -> % First contains {Client, Tc, Act}
                             % Update the queue
                             Updated_Q_Tree = gb_trees:enter(Tw, Q2),
                             ServerPid ! {first, First},
