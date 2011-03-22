@@ -39,7 +39,7 @@ initialize() ->
 %% - Last_Event: Indicates if a transaction was committed/aborted during last execution.
 %%   Contains the timestamp of the transaction. Zero if no transaction was aborted/committed.
 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Last_Event) ->
-    
+
     % Depending on the previous status received in Last_Event we must check the Waiting tree
     case Last_Event > 0 of
         true -> 
@@ -61,7 +61,7 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
                     {TransactionsUpdated_Q, Status_Q} =
                         case Act_Q of 
                             {read,Var_Q} -> 
-                                do_read(ObjectsMgrPid, WaitMgrPid, Tc_Q, Var_Q, Transactions);
+                                do_read(ObjectsMgrPid, WaitMgrPid, Tc_Q, Var_Q, Transactions, Client_Q);
                             {write,Var_Q,Value_Q} -> 
                                 do_write(ObjectsMgrPid, Tc_Q, Var_Q, Value_Q, Transactions)
                         end,
@@ -71,15 +71,20 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
                             io:format("-WaitCheck: Action failed - Aborting~n"),
                             %If Tc_Q aborts but has more actions in the queue it must be managed
                             WaitMgrPid ! {manageAbort, {Last_Event, Client_Q}},
-                            Client_Q ! {abort, self()}
-                    end,
-                    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated_Q,Last_Event);
+                            server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated_Q,0),
+                            Client_Q ! {abort, self()};
+                        continue ->
+                            server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,
+                                        TransactionsUpdated_Q,Last_Event)
+                    end;                   
                 % The queue is now empty, the element has been deleted by the Wait Manager.
                 {empty_queue} ->
                     io:format("-WaitCheck: The action queue for ~p is now empty~n", [Last_Event]),
                     io:format("-WaitCheck: Resuming normal behaviour~n"),
                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,0)
-            end
+            end;
+        _Else ->
+            ok
     end,
     
     receive
@@ -113,42 +118,64 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
 	    io:format("Received ~p from client ~p in transacion ~p.~n", [Act, Client, Tc]),
 
         %Before applying action we must check if Tc is currently waiting
-        WaitMgrPid ! {checkT, {Tc, Act}},
+        WaitMgrPid ! {checkT, {Client, Tc, Act}},
         receive
             {must_wait} ->
+                io:format("Transaction ~p must wait~n", [Tc]),
                 % continue loop without changes to Transactions
                 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Last_Event);    
             {proceed} ->                            
+                io:format("Transaction ~p can proceed~n", [Tc]),
                 {TransactionsUpdated, Status} =
                     case Act of 
                         {read,Var} -> 
-                            do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions);
+                            do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions, Client);
                         {write,Var,Value} -> 
                             do_write(ObjectsMgrPid, Tc, Var, Value, Transactions)
                     end,
                 % If the action failed, send abort to the client
                 case Status of
                     abort ->
-                        Client ! {abort, self()}
-                end,
-                server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated,Last_Event)
+                        io:format("Transaction ~p failed - Aborting~n", [Tc]),
+                        % Inform the client and verify waiting queues in next call
+                        Client ! {abort, self()},
+                        server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated,Tc);
+                    continue ->
+                        server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated,Last_Event)
+                end
         end;
-	{confirm, Client} -> 
+        {confirm, Client} -> 
 	    % Once, all the actions are sent, the client sends a confirm message 
 	    % and waits for the server reply.
         Tc = dict:fetch(Client,Clients),
 	    io:format("Client ~p has ended transaction ~p .~n", [Client, dict:fetch(Client,Clients)]),
 
-        % TO-DO: Before answering confirm we must check if Tc is currently waiting
-%%         WaitMgrPid ! {checkT, {Tc, Act}},
+        % Before answering confirm we must check if Tc is currently waiting
+%%         WaitMgrPid ! {checkT, {Client, Tc, {confirm}}},
 %%         receive
 %%             {must_wait} ->
+%%                 io:format("Confirm action ~p must wait~n", [Tc]),
 %%                 % continue loop without changes to Transactions
 %%                 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Last_Event);    
 %%             {proceed} ->                            
-%%                 % do_confirm() TO-DO
-%%                 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Last_Event)%TO-DO TransUpdated
-%%         end,
+%%                 io:format("Confirm action ~p can proceed~n", [Tc]),
+%%                 %TO-DO create do_confirm and manage its result
+%%                 {TransactionsUpdated, Status} =
+%%                     do_confirm(),
+                
+%%                 % Send message to the client according to Status
+%%                 case Status of
+%%                     commit ->
+%%                         io:format("Transaction ~p can commit~n", [Tc]),
+%%                         % Inform the client and verify waiting queues in next call
+%%                         Client ! {commit, self()}, %TO-DO verify: is 'commit' the right message?
+%%                         server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated,Tc);
+%%                     % Transaction must wait for earlier transactions to commit
+%%                     wait ->
+%%                         %TO-DO Think this!
+%%                         server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,TransactionsUpdated,Last_Event)
+%%                 end
+%%         end;          
 
 	    Client ! {abort, self()}, %TO-DO erase
 	    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Last_Event) %TO-DO erase
@@ -160,7 +187,7 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,L
     end.
 
 %% - Read function
-do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions) ->
+do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions, Client) ->
     io:format("\tValidating read rule~n"),
     ObjectsMgrPid ! {getObject,Var},
     {Val, WTS, _, Versions} = receive {object, O} -> O end,
@@ -175,12 +202,12 @@ do_read(ObjectsMgrPid, WaitMgrPid, Tc, Var, Transactions) ->
                     %update read timestamp
 					ObjectsMgrPid ! {updateObject, Var, {Val, WTS, Tc, Versions}}, 
 					io:format("\t\t\tClient ~p reads ~p = ~p~n",[Tc, Var, Val]);				    
-                false ->
+                false -> %TO-DO If it is me then I should probably not wait
 					io:format("\t\t\tWait until the transaction that made version ~p of '~w' commits or aborts.~n", 
                               [DSelected, Var]),
                     % Client blocks, but server should not block!
                     % Wait manager must create a new queue for Dselected
-                    WaitMgrPid ! {insertT, {Tc, {read, Val}, DSelected}},
+                    WaitMgrPid ! {insertT, {Client, Tc, {read, Val}, DSelected}},
                     receive %TO-DO Perhaps eliminate the receive and just print
                         {inserted} -> 
                             io:format("\t\t\t Transaction ~p was inserted in Queue_Tree waiting for ~p.~n",
@@ -212,7 +239,7 @@ do_write(ObjectsMgrPid, Tc, Var, Value, Transactions) ->
                                      {Val, WTS, RTS, gb_trees:update(Tc, Value, Versions)}}
             end,
             {value, {Client,State,WriteOps}} = gb_trees:lookup(Tc, Transactions),
-            %keep wich variables i have to commit with the transaction
+            %keep wich variables I have to commit with the transaction
             TransactionsUpdt = gb_trees:update(Tc, {Client,State,sets:add_element(Var,WriteOps)}, Transactions), 
             {TransactionsUpdt, continue};
         false ->
@@ -268,7 +295,7 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
                     io:format("--WaitManager: Transaction ~p must wait for ~p~n", [Tc, Tw]),
                     % Enqueue the action in Tw's queue
                     Queue = gb_trees:get(Tw, Queue_Tree),
-                    Updated_Q_Tree = gb_trees:enter(Tw, queue:in({Client, Tc, Act}, Queue)),
+                    Updated_Q_Tree = gb_trees:enter(Tw, queue:in({Client, Tc, Act}, Queue), Queue_Tree),
                     ServerPid ! {must_wait},
                     wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts)
             end;
@@ -288,7 +315,8 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
                     io:format("--WaitManager: Queue for ~p already exists: Updating~n", [Tw]),
                     New_Q = Tw_Queue
             end,
-            Updated_Q_Tree = gb_trees:insert(Tw, queue:in({Client, Tc, Act}, New_Q)),
+            Updated_Queue = queue:in({Client, Tc, Act}, New_Q),
+            Updated_Q_Tree = gb_trees:enter(Tw, Updated_Queue, Queue_Tree),
             ServerPid ! {inserted},
             wait_manager(ServerPid, Updated_Q_Tree, Updated_Waiting_Ts);
         % Returns the first element from the queue of Tw in Queue_Tree or 'empty_queue' if the queue is empty
@@ -302,7 +330,7 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
                         {{value,First}, Q2} -> % First contains {Client, Tc, Act}
                             io:format("--WaitManager: First value of queue for ~p is {Client, Tc, Act}=~p~n", [Tw, First]),
                             % Update the queue
-                            Updated_Q_Tree = gb_trees:enter(Tw, Q2),
+                            Updated_Q_Tree = gb_trees:enter(Tw, Q2, Queue_Tree),
                             ServerPid ! {first, First},
                             wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts);
                         % If the queue is empty, remove the element from the tree
@@ -325,8 +353,10 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
                 {value, Tw} ->
                     io:format("--WaitManager: Exact match {Tc, Tw}={~p, ~p} found. Deleting~n", [Tc, Tw]),
                     Updated_Waiting_Ts = gb_tree:delete(Tc, Waiting_Ts),
-                    wait_manager(ServerPid, Queue_Tree, Updated_Waiting_Ts)
+                    wait_manager(ServerPid, Queue_Tree, Updated_Waiting_Ts);
                     %TO-DO Perhaps send a 'success' message?
+                _Else ->
+                    ok
             end,
             wait_manager(ServerPid, Queue_Tree, Waiting_Ts);
         % The transaction was aborted. All actions that belong to it must be deleted from Queue_Tree
@@ -338,7 +368,9 @@ wait_manager(ServerPid, Queue_Tree, Waiting_Ts) ->
                     L = del_all_client(Client, queue:to_list(Q)),
                     io:format("--WaitManager: Final Q length: ~p~n", [length(L)]),
                     Updated_Q_Tree = gb_trees:enter(Tw, queue:from_list(L)),
-                    wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts)
+                    wait_manager(ServerPid, Updated_Q_Tree, Waiting_Ts);
+                _Else ->
+                    ok
             end,
             wait_manager(ServerPid, Queue_Tree, Waiting_Ts)
     end.
