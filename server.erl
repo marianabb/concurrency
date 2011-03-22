@@ -279,7 +279,12 @@ do_read(Clients, ObjectsMgrPid, WaitMgrPid, {action, Client, {read, Var}}, Trans
                               [Tc, DSelected,Var]),					
 		    %update read timestamp
 		    ObjectsMgrPid ! {updateObject, Var, {Val, WTS, Tc, Versions}}, 
-		    io:format("\t\t\tt.~p reads ~p = ~p~n",[Tc, Var, Val]),
+		    RVal = case DSelected of
+			       WTS -> Val;
+			       Tc -> {value, TcVal} = gb_trees:lookup(DSelected, Versions),
+				     TcVal
+			   end,		     		    
+		    io:format("\t\t\tt.~p reads ~p = ~p~n",[Tc, Var, RVal]),
 		    Transactions;
                 false -> 
 		    io:format("\t\t\tWait until the transaction that made version ~p of '~w' commits or aborts.~n", 
@@ -399,7 +404,8 @@ wait_manager(ServerPid, Queue_Tree) ->
 		    Q
 		end,
 	    UpdatedActionQueue = queue:in({old, Action}, ActionQueue),
-	    UpdatedQueue_Tree = gb_trees:update(Transaction, UpdatedActionQueue, Queue_Tree),
+	    %UpdatedQueue_Tree = gb_trees:update(Transaction, UpdatedActionQueue, Queue_Tree),
+	    UpdatedQueue_Tree = gb_trees:enter(Transaction, UpdatedActionQueue, Queue_Tree),
 	    wait_manager(ServerPid, UpdatedQueue_Tree);
 	{dequeue, Transaction} ->
 	    case gb_trees:lookup(Transaction, Queue_Tree) of
@@ -410,7 +416,8 @@ wait_manager(ServerPid, Queue_Tree) ->
 		{value, Q} ->
 		    case queue:out(Q) of
 			{{value,FirstAction}, QUpdted} -> 
-			    Queue_Tree_Updted = gb_trees:update(Transaction, QUpdted, Queue_Tree),
+			    %Queue_Tree_Updted = gb_trees:update(Transaction, QUpdted, Queue_Tree),
+			    Queue_Tree_Updted = gb_trees:enter(Transaction, QUpdted, Queue_Tree),
 			    ServerPid ! FirstAction,
 			    wait_manager(ServerPid, Queue_Tree_Updted)
 			    ;
