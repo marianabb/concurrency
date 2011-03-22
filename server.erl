@@ -76,7 +76,7 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 					gb_trees:delete(Tts,Transactions),Events)
 				;
 			none ->
-			    %%% io:format("\t**** Commited already handled ~n"),
+			    io:format("\t**** Commited already handled ~n"),
 			    true
 						%ok, this means I already handled the commit
 		    end;
@@ -84,12 +84,12 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 		    true %nothing special	    
 	    end,
 	    %see if a next committed transaction was waiting to commit
-	    %%% io:format("\t**** Can another transaction commit?~n"),
+	    io:format("\t**** Can another transaction commit?~n"),
 	    TransactionsL = gb_trees:keys(Transactions),
 	    case TransactionsL of
 		[] ->
 		    none
-		    %%% ,io:format("\t**** No, no one can~n")
+		    ,io:format("\t**** No, no one can~n")
 		    ; %no other transactions, nothing to do
 		[NextT|_] ->
 		    {value, {_,State,_,_}} = gb_trees:lookup(NextT, Transactions),
@@ -97,10 +97,14 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 			'finished' ->
 			    io:format("\t.~p can commit now.~n",[NextT]),
 			    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,
-					gb_trees:delete(NextT,Transactions),queue:in({commited,NextT},Events))    
+					gb_trees:delete(NextT,Transactions),queue:in({commited,NextT},Events));
+			'going-on' ->
+			    true; %cannot commit if not finished
+			'waiting' ->
+			    true %cannot commit if not finished	    
 		    end
 	    end,
-	    %%% io:format("\t**** Is there anything left?~n"),
+	    io:format("\t**** Is there anything left?~n"),
 	    WaitMgrPid ! {dequeue,Tts},
 		receive 
 		    no_action ->
@@ -114,15 +118,20 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 			    case A_Act of 
 				{read,_} -> 
 				    do_read(Clients, ObjectsMgrPid, WaitMgrPid, {action, A_Client, A_Act}, Transactions);
-				{write,_,_g} -> 
+				{write,_,_} -> 
 				    do_write(Clients, ObjectsMgrPid, {action, A_Client, A_Act}, Transactions)
 			    end,
 			case A_Status of 
 			    abort ->
 				A_Client ! {abort, self()},
-				server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,queue:in({aborted,A_Tc},Events));			  
+				server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,
+					    TSGenerator,A_TransactionsUpdated,queue:in({aborted,A_Tc},Events));			  
 			    continue ->
-				server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,Events)
+				{value, {A_Tc_Client,_,A_Tc_WriteSets,A_Tc_WaitingFor}} = 
+				    gb_trees:lookup(A_Tc, A_TransactionsUpdated),
+				server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,
+					    gb_trees:update(A_Tc,{A_Tc_Client,'going-on',A_Tc_WriteSets,A_Tc_WaitingFor},
+							    A_TransactionsUpdated),Events)
 			end;			
 		    {old, {confirm, A_Client}} ->
 			{A_TransactionsUpdated, A_Status, A_Event} = 
@@ -360,7 +369,7 @@ store_loop(ServerPid, Database) ->
             io:format("Database status: ~w.~n",[Database]),
             store_loop(ServerPid,Database);
 	{commit, Var, Val} ->
-	    io:format("\tNew value at the store: '~p' = ~p.~n",[Var,Val]),
+	    %%io:format("\tNew value at the store: '~p' = ~p.~n",[Var,Val]),
 	    NewDB = updateDB(Database, {Var,Val}),
 	    store_loop(ServerPid, NewDB)				   
     end.
