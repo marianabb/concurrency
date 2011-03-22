@@ -76,7 +76,7 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 					gb_trees:delete(Tts,Transactions),Events)
 				;
 			none ->
-			    io:format("\t**** Commited already handled ~n"),
+			    %%%% io:format("\t**** Commited already handled ~n"),
 			    true
 						%ok, this means I already handled the commit
 		    end;
@@ -84,12 +84,12 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 		    true %nothing special	    
 	    end,
 	    %see if a next committed transaction was waiting to commit
-	    io:format("\t**** Can another transaction commit?~n"),
+	    %%%% io:format("\t**** Can another transaction commit?~n"),
 	    TransactionsL = gb_trees:keys(Transactions),
 	    case TransactionsL of
 		[] ->
 		    none
-		    ,io:format("\t**** No, no one can~n")
+		    %%%% ,io:format("\t**** No, no one can~n")
 		    ; %no other transactions, nothing to do
 		[NextT|_] ->
 		    {value, {_,State,_,_}} = gb_trees:lookup(NextT, Transactions),
@@ -104,7 +104,7 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 			    true %cannot commit if not finished	    
 		    end
 	    end,
-	    io:format("\t**** Is there anything left?~n"),
+	    %%%% io:format("\t**** Is there anything left?~n"),
 	    WaitMgrPid ! {dequeue,Tts},
 		receive 
 		    no_action ->
