@@ -26,8 +26,11 @@ initialize() ->
     %% Object: name -> {Values, WTS, RTS, Versions}
     ServerPid = self(),
     StorePid = spawn_link(fun() -> store_loop(ServerPid,Initialvals) end),
+    %% Manager for values and versions
     ObjectsMgrPid = spawn_link(fun() -> object_manager(ServerPid,InitialObjects) end),
+    %% Manager for waiting actions and transactions
     WaitMgrPid = spawn_link(fun() -> wait_manager(ServerPid, gb_trees:empty()) end),
+    %% Timestamp generator
     TSGenerator = counter:start(),
     server_loop(dict:new(),StorePid, ObjectsMgrPid, WaitMgrPid, TSGenerator, gb_trees:empty(), queue:new()).
 %%%%%%%%%%%%%%%%%%%%%%% STARTING SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -36,44 +39,47 @@ initialize() ->
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE SERVER %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% - The server maintains a list of all connected clients and a store holding
 %% the values of the global variabe a, b, c and d 
-%% - Last_Event: Indicates if a transaction was committed/aborted during last execution.
-%%   Contains the timestamp of the transaction. Zero if no transaction was aborted/committed.
+%% - Events: Queue that contains the transactions that have committed/aborted during last execution.
+%%   Contains the event types and the timestamps of the transactions.
+%% - Transactions: Tree that contains the transactions, their status, set of writes and timestamps.
 server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,Events) ->
+    %% Before processing any new messages, check the Events queue
     case queue:peek(Events) of
-	empty ->
+    empty ->
 	    true
-	    %no events, get the next message
-	    ;	
-	{value, {EventType, Tts}} ->
+	    %%no events, get the next message
+        ;	
+   {value, {EventType, Tts}} ->
 	    case EventType of
-		commited ->
+		commited -> % TO-DO committed has double t
 		    io:format("Event: t.~p commited or can commit.~n",[Tts]);
 		aborted ->
 		    io:format("Event: t.~p aborted.~n",[Tts])
 		end,
 	    case EventType of
-		commited ->
+		commited -> % TO-DO committed has double t
 		    case gb_trees:lookup(Tts, Transactions) of
 			{value, {_,'finished',SetOfWrites,_}} ->
 			    VariablesToCommit = sets:to_list(SetOfWrites),
 			    lists:foreach(
 			      fun(V) ->
-				      %set the values of the tentative versions become the values of objects
+				      %% Let the values of the tentative versions become the values of objects
 				      ObjectsMgrPid ! {getObject,V},
 				      {_, _, RTSV, VersionsV} = receive {object, O} -> O end,
 				      {value, NewVal} = gb_trees:lookup(Tts,VersionsV),
 				      %%% io:format("\t**** Update ~p from version ~p! with value ~p ~n", [V, Tts, NewVal]),
 				      ObjectsMgrPid ! {updateObject, V, {NewVal, Tts, RTSV, VersionsV}}, 
-				      %delete the version?						
-				      StorePid ! {commit, V, NewVal} %also at the store
+				      %% TO-DO Delete the version? I would say yes						
+                      %% Also change the value at the store
+				      StorePid ! {commit, V, NewVal}
 			      end,
 			      VariablesToCommit),
 			    io:format("\tt.~p committed.~n",[Tts]),
 			    io:format("\t"),
 			    StorePid ! {printNow, self()},
-			    true = receive {store_loop, print_ok} -> true end,
+			    true = receive {store_loop, print_ok} -> true end, %% TO-DO Erase
 			    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,
-					gb_trees:delete(Tts,Transactions),Events)
+                            gb_trees:delete(Tts,Transactions),Events)
 				;
 			none ->
 			    %%%% io:format("\t**** Commited already handled ~n"),
@@ -83,14 +89,15 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 		aborted ->
 		    true %nothing special	    
 	    end,
-	    %see if a next committed transaction was waiting to commit
+
+	    %% Check if a next committed transaction is waiting to commit
 	    %%%% io:format("\t**** Can another transaction commit?~n"),
 	    TransactionsL = gb_trees:keys(Transactions),
 	    case TransactionsL of
 		[] ->
 		    none
 		    %%%% ,io:format("\t**** No, no one can~n")
-		    ; %no other transactions, nothing to do
+		    ; %% No other transactions, nothing to do
 		[NextT|_] ->
 		    {value, {_,State,_,_}} = gb_trees:lookup(NextT, Transactions),
 		    case State of
@@ -107,11 +114,13 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 	    %%%% io:format("\t**** Is there anything left?~n"),
 	    WaitMgrPid ! {dequeue,Tts},
 		receive 
-		    no_action ->
-			%nothing to do, we are done with the event
+        %% Nothing to do, we are done with the event
+		no_action ->
 			io:format("\tNothing else to do with this event~n."),
 			server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,queue:drop(Events));
-		    {old, {action, A_Client, A_Act}} ->
+        %% There is an action waiting. We can execute it now.
+		{old, {action, A_Client, A_Act}} ->
+            %% Get the transaction and execute it.
 			A_Tc = dict:fetch(A_Client,Clients),
 			io:format("Action ~p from client ~p in transacion ~p was waiting.~n", [A_Act, A_Client, A_Tc]),
 			{A_TransactionsUpdated, A_Status} =
@@ -123,39 +132,44 @@ server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,Transactions,E
 			    end,
 			case A_Status of 
 			    abort ->
-				A_Client ! {abort, self()},
-				server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,
-					    TSGenerator,A_TransactionsUpdated,queue:in({aborted,A_Tc},Events));			  
+                    %% Abort the transaction and enqueue the event
+                    A_Client ! {abort, self()},
+                    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,
+                                TSGenerator,A_TransactionsUpdated,queue:in({aborted,A_Tc},Events));			  
 			    continue ->
-				{value, {A_Tc_Client,_,A_Tc_WriteSets,A_Tc_WaitingFor}} = 
-				    gb_trees:lookup(A_Tc, A_TransactionsUpdated),
-				server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,
-					    gb_trees:update(A_Tc,{A_Tc_Client,'going-on',A_Tc_WriteSets,A_Tc_WaitingFor},
-							    A_TransactionsUpdated),Events)
-			end;			
-		    {old, {confirm, A_Client}} ->
-			{A_TransactionsUpdated, A_Status, A_Event} = 
-			    do_confirm(Clients, {confirm, A_Client}, Transactions),
-			case A_Status of
-			    continue ->
-				A_Client ! {committed, self()}, %a transaction is always able to commit (client needs not to wait)
-				case A_Event of
-				    none ->
-					%transacction has to wait to commit 
-					server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,Events);
-				    {commited, _} ->
-					%transaction has committed, notify
-					server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,queue:in(A_Event,Events))
-				end;
-			    wait ->
-				none = A_Event,
-				A_Tc = dict:fetch(A_Client,Clients),
-				{value,{A_Client,_,_,A_WaitingFor}} = gb_trees:lookup(A_Tc, Transactions),
-				io:format("\t~w must wait, transaction ~p is waiting for transacion ~p\~n",
-					  [{confirm, A_Client}, A_Tc, A_WaitingFor]),
-				WaitMgrPid ! {enqueue, {confirm, A_Client}, A_WaitingFor},
-				server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,Events)
-			end
+                    %% Obtain the transaction, save it with status 'going-on' and continue execution.
+                    {value, {A_Tc_Client,_,A_Tc_WriteSets,A_Tc_WaitingFor}} = 
+                        gb_trees:lookup(A_Tc, A_TransactionsUpdated),
+                    server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,
+                                gb_trees:update(A_Tc,{A_Tc_Client,'going-on',A_Tc_WriteSets,A_Tc_WaitingFor},
+                                                A_TransactionsUpdated)
+                                ,Events)
+			end;
+        %% There is a confirm action waiting. We attempt to commit.
+		{old, {confirm, A_Client}} ->
+			 {A_TransactionsUpdated, A_Status, A_Event} = 
+                    do_confirm(Clients, {confirm, A_Client}, Transactions),
+             case A_Status of
+                 continue ->
+                     A_Client ! {committed, self()}, %a transaction is always able to commit (client needs not to wait)
+                     case A_Event of
+                         none ->
+                         %% Transaction has to wait to commit %TO-DO wait? there is a wait case below
+                             server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,Events);
+                         {commited, _} -> %% TO-DO committed has double t
+                         %% Transaction has committed successfully, notify
+                             server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,
+                                         queue:in(A_Event,Events))
+                     end;
+                 wait ->
+                     none = A_Event, %% This must be true
+                     A_Tc = dict:fetch(A_Client,Clients),
+                     {value,{A_Client,_,_,A_WaitingFor}} = gb_trees:lookup(A_Tc, Transactions),
+                     io:format("\t~w must wait, transaction ~p is waiting for transaction ~p\~n",
+                               [{confirm, A_Client}, A_Tc, A_WaitingFor]),
+                     WaitMgrPid ! {enqueue, {confirm, A_Client}, A_WaitingFor},
+                     server_loop(Clients,StorePid,ObjectsMgrPid,WaitMgrPid,TSGenerator,A_TransactionsUpdated,Events)
+             end
 		end
     end,
 
@@ -314,7 +328,7 @@ do_write(Clients, ObjectsMgrPid, {action, Client, {write,Var,Value}}, Transactio
         true ->
             io:format("\t\t Valid~n"),
             io:format("\t\t\tPerform write operation of t.~p in '~p' ~n",[Tc, Var]),
-            case gb_trees:lookup(Tc,Versions) of
+            case gb_trees:lookup(Tc,Versions) of %% TO-DO: Just use enter and delete case
                 none ->
 		    ObjectsMgrPid ! {updateObject, Var, 
                                      {Val, WTS, RTS, gb_trees:enter(Tc, Value, Versions)}};
@@ -340,26 +354,27 @@ do_confirm(Clients, {confirm, Client}, Transactions)->
     {value, {Client,TcStatus,WriteSets,WaitingFor}} = gb_trees:lookup(Tc, Transactions),
     case TcStatus of
 	'going-on' -> 
-	    %perform action
+	    %% Perform action
 	    io:format("\tWrite data of t.~p to permanent storage.~n",[Tc]),
-	    %a transaction is always able to commit
-	    %nevertheless, committed versions of each object must be created in timestamp order, so we
-	    %need to check	    
+	    %% A transaction is always able to commit
+	    %% Nevertheless, committed versions of each object must be created in timestamp order	    
 	    TransactionsL = gb_trees:keys(Transactions),
-	    {TransactionsUpdated, Event} = case TransactionsL of					       
-					       [Tc|_] -> %no need to wait to commit
-						   io:format("\tt.~p finished and can commit.~n",[Tc]),
-						   %{gb_trees:delete(Tc,Transactions), {commited, Tc}};
-						   {gb_trees:update(Tc,{Client,'finished',WriteSets,WaitingFor},
-								    Transactions), {commited, Tc}};
-					       [X|_] ->
-						   io:format("\tt.~p finished but cannot commit, must wait.~n",[Tc]),
-						   io:format("\t(For example, ~p has neither committed nor aborted)~n",[X]),
-						   {gb_trees:update(Tc,{Client,'finished',WriteSets,WaitingFor},Transactions), none}
-					   end,
+	    {TransactionsUpdated, Event} = 
+                case TransactionsL of					       
+                    [Tc|_] -> %% Tc is the smallest transaction. No need to wait to commit
+                        io:format("\tt.~p finished and can commit.~n",[Tc]),
+                        %%{gb_trees:delete(Tc,Transactions), {commited, Tc}}; %TO-DO
+                        {gb_trees:update(Tc,{Client,'finished',WriteSets,WaitingFor},Transactions), 
+                         {commited, Tc}};
+                    [X|_] -> %% Must wait to commit
+                        io:format("\tt.~p finished but cannot commit, must wait.~n",[Tc]),
+                        io:format("\t(For example, ~p has neither committed nor aborted)~n",[X]),
+                        {gb_trees:update(Tc,{Client,'finished',WriteSets,WaitingFor},Transactions), 
+                         none}
+                end,
 	    {TransactionsUpdated, continue, Event};
 	'waiting' -> 	    
-	    %transaction is waiting, the confirm message has to wait too
+	    %% Transaction is waiting, the confirm message has to wait too
 	    {Transactions, wait, none}
     end.
 
@@ -395,38 +410,37 @@ object_manager(ServerPid, Objects) ->
 %% - A manager for the waiting transactions
 wait_manager(ServerPid, Queue_Tree) ->
     receive
-	{enqueue, Action, Transaction} ->
-	    ActionQueue = 
-	    case gb_trees:lookup(Transaction, Queue_Tree) of
-		none ->
-		    queue:new();
-		{value, Q} ->
-		    Q
-		end,
-	    UpdatedActionQueue = queue:in({old, Action}, ActionQueue),
-	    %UpdatedQueue_Tree = gb_trees:update(Transaction, UpdatedActionQueue, Queue_Tree),
-	    UpdatedQueue_Tree = gb_trees:enter(Transaction, UpdatedActionQueue, Queue_Tree),
-	    wait_manager(ServerPid, UpdatedQueue_Tree);
-	{dequeue, Transaction} ->
-	    case gb_trees:lookup(Transaction, Queue_Tree) of
-		none ->		    
-		    ServerPid ! no_action, %no action is waiting for Transaction
-		    wait_manager(ServerPid, Queue_Tree)
-		    ;
-		{value, Q} ->
-		    case queue:out(Q) of
-			{{value,FirstAction}, QUpdted} -> 
-			    %Queue_Tree_Updted = gb_trees:update(Transaction, QUpdted, Queue_Tree),
-			    Queue_Tree_Updted = gb_trees:enter(Transaction, QUpdted, Queue_Tree),
-			    ServerPid ! FirstAction,
-			    wait_manager(ServerPid, Queue_Tree_Updted)
-			    ;
-                         {empty, Q} ->
-			    Queue_Tree_Updted = gb_trees:delete(Transaction, Queue_Tree),
-			    ServerPid ! no_action,  %no action is waiting for Transaction
-			    wait_manager(ServerPid, Queue_Tree_Updted)
-		    end		    
-	    end	    
+        {enqueue, Action, Transaction} ->
+            ActionQueue = 
+                case gb_trees:lookup(Transaction, Queue_Tree) of
+                    none ->
+                        queue:new();
+                    {value, Q} ->
+                        Q
+                end,
+            UpdatedActionQueue = queue:in({old, Action}, ActionQueue), %TO-DO why old?
+            % UpdatedQueue_Tree = gb_trees:update(Transaction, UpdatedActionQueue, Queue_Tree),
+            UpdatedQueue_Tree = gb_trees:enter(Transaction, UpdatedActionQueue, Queue_Tree),
+            wait_manager(ServerPid, UpdatedQueue_Tree);
+        {dequeue, Transaction} ->
+            case gb_trees:lookup(Transaction, Queue_Tree) of
+                none ->		    
+                    ServerPid ! no_action, % No action is waiting for Transaction
+                    wait_manager(ServerPid, Queue_Tree);
+                {value, Q} ->
+                    case queue:out(Q) of
+                        %% If an action is waiting send it to the server
+                        {{value,FirstAction}, QUpdted} -> 
+                            %% Queue_Tree_Updted = gb_trees:update(Transaction, QUpdted, Queue_Tree),
+                            Queue_Tree_Updted = gb_trees:enter(Transaction, QUpdted, Queue_Tree),
+                            ServerPid ! FirstAction,
+                            wait_manager(ServerPid, Queue_Tree_Updted);
+                        {empty, Q} ->
+                            Queue_Tree_Updted = gb_trees:delete(Transaction, Queue_Tree),
+                            ServerPid ! no_action,  %no action is waiting for Transaction
+                            wait_manager(ServerPid, Queue_Tree_Updted)
+                    end		    
+            end	    
     end.
 
 
