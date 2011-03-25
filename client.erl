@@ -101,8 +101,7 @@ send(Window, ServerPid, []) ->
 	    io:format("client active unexpected: ~p~n",[Other])
     end;
 send(Window, ServerPid, [H|T]) -> 
-    %sleep(3), 
-    io:read("send next message>>"),
+    sleep(3), 
     case loose(0) of
 	%% In order to handle losses, think about adding an extra field to the message sent
 	false -> ServerPid ! {action, self(), H}; 

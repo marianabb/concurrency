@@ -14,7 +14,7 @@ window.erl, server.erl, README.txt, Makefile, system.jpg
 
 2/ Makefile:
  - In order to compile run make
- - In order to clean run make clean
+ - In order to clen run make clean
 In case you add other files don't forget to add them in the Makefile
 
 3/ OS:

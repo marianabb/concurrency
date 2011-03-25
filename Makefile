@@ -1,10 +1,9 @@
-
 .SUFFIXES: .erl .beam
 
 .erl.beam:
 	erlc -W $<
 
-MODS = client parser window server counter
+MODS = client parser window server
 
 all: compile
 
