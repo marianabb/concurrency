@@ -49,25 +49,39 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
             MM ! {ok, self()},
             io:format("Received request to connect from: ~p.~n", [Client]),
             StorePid ! {print, self()},
-            server_loop(dict:store(Client,0,ClientList),StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+            server_loop(dict:store(Client,{0,0},ClientList),StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
         {close, Client} -> 
             io:format("Client~p has left the server.~n", [Client]),
             StorePid ! {print, self()},
             server_loop(dict:erase(Client, ClientList),StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
-        {request, Client} -> 
+        {request, Client, ReqNumber} -> 
             %% A transaction is started.
             %% The user enters the run command in the client window. 
             %% This is marked by sending a request to the server.
-            TS = counter:value(TSGenerator), 
-            counter:increment(TSGenerator),  
-            ClientLUpdated = dict:store(Client,TS,ClientList),
-            %% Insert a new transaction in the tree
-            UpdatedTransactions = gb_trees:insert(TS,{Client,'going-on',dict:new(),dict:new()},Transactions),
-            io:format("Client ~p has began transaction ~p.~n", [Client, TS]),
-            Client ! {proceed, self()},
-            server_loop(ClientLUpdated,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions);
+            
+            %% Check if the client has already requested the same transaction
+            case dict:find(Client, ClientList) of
+                error ->
+                    %% Client is not registered
+                    io:format("Warning: Received a request from an unregistered client~n");
+                {ok, {_, ReqNumber}} ->
+                    %% Received a repeated request
+                    io:format("Warning: Ignoring repeated request from client ~p~n", [Client]),
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                {ok, {_, NextRequest}} ->
+                    %% The request is new: Proceed with execution
+                    TS = counter:value(TSGenerator), 
+                    counter:increment(TSGenerator),  
+                    ClientLUpdated = dict:store(Client,{TS, NextRequest},ClientList),
+                    %% Insert a new transaction in the tree
+                    UpdatedTransactions = gb_trees:insert(TS,{Client,'going-on',dict:new(),dict:new(),1,'not_sent'},
+                                                          Transactions),
+                    io:format("Client ~p has began transaction ~p.~n", [Client, TS]),
+                    Client ! {proceed, self()},
+                    server_loop(ClientLUpdated,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions)
+            end;
         {confirm, Client} -> 
-            Tc = dict:fetch(Client,ClientList),
+            {Tc,_} = dict:fetch(Client,ClientList),
             io:format("Received Confirm from client ~p in transacion ~p.~n", [Client, Tc]),
             
             %% Confirm and handle outcoming status
@@ -76,53 +90,90 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
             StorePid ! {print, self()},
             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions);
         
-        {action, Client, Act} ->
+        {action, Client, Act, ActNumber} ->
             %% The client sends the actions of the list (the transaction) one by one 
             %% in the order they were entered by the user.
-            Tc = dict:fetch(Client,ClientList),
+            {Tc,_} = dict:fetch(Client,ClientList),
             io:format("Received ~p from client ~p in transacion ~p.~n", [Act, Client, Tc]),
             
             %% Check status of Tc. If aborted: do nothing. Otherwise continue execution.
-            {value, {Client, Status, _, _}} = gb_trees:lookup(Tc, Transactions),
+            {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
             case Status of
                 'aborted' ->
                     %% Everything was handled previously
                     server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
                 'going-on' ->
-                    {UpdatedTransactions, Result} = 
-                        case Act of
-                            {read, Name} ->
-                                do_read(Tc, Name, Transactions, ObjectsMgrPid, DepsMgrPid);
-                            {write, Name, Value} ->
-                                do_write(Tc, Name, Value, Transactions, ObjectsMgrPid)
-                        end,
-                    case Result of
-                        abort ->
-                            %% If the action aborted: send abort message to Client
-                            io:format("Action ~p aborted. Sending abort to client~n", [Act]),
-
-                            %% Handle abort here
-                            %% Restore original values and timestamps to modified variable
-                            do_restore(Tc, ObjectsMgrPid, UpdatedTransactions),
-                            %% Send the message to the client
-                            Client ! {abort, self()},
-                            %% Propagate the event: Update Dependency Dictionary
-                            TPropagated = propagate_event(Tc,'aborted',ObjectsMgrPid,DepsMgrPid,
-                                                          StorePid,UpdatedTransactions),
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TPropagated);
-                        
-                        continue ->
-                            %% If action was successful: continue
-                            io:format("Action ~p was successful~n", [Act]),
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions)
+                    %% Only execute actions that come in the right order
+                    case (ActNumber =:= Next) of
+                        false ->
+                            %% If the action is not the one the server expects: Ignore it
+                            %%and ask for resend only once.
+                            case (Resend =:= 'sent') of
+                                false ->
+                                    %% Send a message to the client asking for resend
+                                    Client ! {resend, ActNumber, self()};
+                                true -> 
+                                    %% The message has been sent already
+                                    ok
+                            end,
+                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                        true ->
+                            %% Reset the Resend flag and set Next to the next action
+                            TransactionsR = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, Next+1, 'not_sent'}, 
+                                                           Transactions),
+                            
+                            %% We can proceed with normal execution                            
+                            {UpdatedTransactions, Result} = 
+                                case Act of
+                                    {read, Name} ->
+                                        do_read(Tc, Name, TransactionsR, ObjectsMgrPid, DepsMgrPid);
+                                    {write, Name, Value} ->
+                                        do_write(Tc, Name, Value, TransactionsR, ObjectsMgrPid)
+                                end,
+                            case Result of
+                                abort ->
+                                    %% If the action aborted: send abort message to Client
+                                    io:format("Action ~p aborted. Sending abort to client~n", [Act]),
+                                    
+                                    %% Handle abort here
+                                    %% Restore original values and timestamps to modified variable
+                                    do_restore(Tc, ObjectsMgrPid, UpdatedTransactions),
+                                    %% Send the message to the client
+                                    Client ! {abort, self()},
+                                    %% Propagate the event: Update Dependency Dictionary
+                                    TPropagated = propagate_event(Tc,'aborted',ObjectsMgrPid,DepsMgrPid,
+                                                                  StorePid,UpdatedTransactions),
+                                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TPropagated);
+                                
+                                continue ->
+                                    %% If action was successful: continue
+                                    io:format("Action ~p was successful~n", [Act]),
+                                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,
+                                                UpdatedTransactions)
+                            end
                     end
-            end   
-    after 50000 ->
+            end
+    %% Used to be 50000, changed to handle lost confirm-messages faster
+    after 10000 ->
             case all_gone(ClientList) of
                 true -> exit(normal);    
-                false -> server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
+                false -> 
+                    %% Ask for resend of confirm messages to the client
+                    reconfirm(dict:fetch_keys(ClientList)),
+                    %% Continue execution
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
             end
     end.
+
+%% - Sends a message to every client in the list to resend the confirm
+%% message. Assumes they have been waiting long enough so that all the
+%% other messages have been executed.
+reconfirm([]) ->
+    ok;
+reconfirm([C|Clients]) ->
+    C ! {reconfirm, self()},
+    reconfirm(Clients).
+
 
 %% - The values are maintained here
 store_loop(ServerPid, Database) -> 
@@ -144,12 +195,12 @@ do_read(Ts, VName, Transactions, ObjectsMgrPid, DepsMgrPid) ->
     ObjectsMgrPid ! {getObject, VName},
     {VValue, RTS, WTS} = receive {object, O} -> O end,
     %% Get information for the Transaction Ts
-    {value, {Client, Status, Deps, Old_Obj}} = gb_trees:lookup(Ts, Transactions),
+    {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Ts, Transactions),
     
     case WTS > Ts of
         true ->
             %% Abort Transaction. Change status to 'aborted'
-            Up_Transactions = gb_trees:enter(Ts, {Client, 'aborted', Deps, Old_Obj}, Transactions),
+            Up_Transactions = gb_trees:enter(Ts, {Client, 'aborted', Deps, Old_Obj, Next, Resend}, Transactions),
             {Up_Transactions, abort};
         false ->
             %% Proceed with read depending on WTS
@@ -161,7 +212,7 @@ do_read(Ts, VName, Transactions, ObjectsMgrPid, DepsMgrPid) ->
                     %% Update RTS of the variable to max(RTS, Ts)
                     ObjectsMgrPid ! {updateObject, VName, {VValue, max(RTS, Ts), WTS}},
                     {Transactions, continue};
-                {value, {_, S, _, _}} ->
+                {value, {_, S, _, _, _, _}} ->
                     case (WTS =:= Ts) of
                         true ->
                             %% A transaction should not depend on itself
@@ -171,7 +222,8 @@ do_read(Ts, VName, Transactions, ObjectsMgrPid, DepsMgrPid) ->
                         false ->
                             %% Use the current status of the other transaction
                             Up_Deps = dict:store(WTS, S, Deps),
-                            Up_Transactions = gb_trees:enter(Ts, {Client, Status, Up_Deps, Old_Obj}, Transactions),
+                            Up_Transactions = gb_trees:enter(Ts, {Client, Status, Up_Deps, Old_Obj, Next, Resend}, 
+                                                             Transactions),
                             %% Save the dependency to the Dependency Dictionary
                             DepsMgrPid ! {enqueue, WTS, Ts},
                             %% Update RTS of the variable to max(RTS, Ts)
@@ -189,12 +241,12 @@ do_write(Ts, VName, New_Value, Transactions, ObjectsMgrPid) ->
     ObjectsMgrPid ! {getObject, VName},
     {VValue, RTS, WTS} = receive {object, O} -> O end,
     %% Get information for the Transaction Ts
-    {value, {Client, Status, Deps, Old_Obj}} = gb_trees:lookup(Ts, Transactions),
+    {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Ts, Transactions),
     
     case RTS > Ts of
         true ->
             %% Abort Transaction. Change status to 'aborted'
-            Up_Transactions = gb_trees:enter(Ts, {Client, 'aborted', Deps, Old_Obj}, Transactions),
+            Up_Transactions = gb_trees:enter(Ts, {Client, 'aborted', Deps, Old_Obj, Next, Resend}, Transactions),
             {Up_Transactions, abort};
         false ->
             case WTS > Ts of
@@ -206,7 +258,7 @@ do_write(Ts, VName, New_Value, Transactions, ObjectsMgrPid) ->
                     io:format("\tWrite of ~p by t.~p can proceed~n", [VName, Ts]),
                     %% Add WTS, OldValue and NewValue of VName to old objects of Ts
                     Up_Old_Obj = dict:store(VName, {WTS, VValue, New_Value}, Old_Obj),
-                    Up_Transactions = gb_trees:enter(Ts, {Client, Status, Deps, Up_Old_Obj}, Transactions),
+                    Up_Transactions = gb_trees:enter(Ts, {Client, Status, Deps, Up_Old_Obj, Next, Resend}, Transactions),
                     %% Update WTS of VName to Ts and Change its value
                     ObjectsMgrPid ! {updateObject, VName, {New_Value, RTS, Ts}},
                     {Up_Transactions, continue}
@@ -216,7 +268,7 @@ do_write(Ts, VName, New_Value, Transactions, ObjectsMgrPid) ->
 %% - Commit changes to store once we know everything went ok
 do_commit(Tc, StorePid, Transactions) ->
     io:format("Executing commit of transaction t.~p~n", [Tc]),
-    {value, {_, _, _, Old_Obj}} = gb_trees:lookup(Tc, Transactions),
+    {value, {_, _, _, Old_Obj, _, _}} = gb_trees:lookup(Tc, Transactions),
     %% Commit to store every value that Tc has changed
     do_commit_aux(Tc, dict:to_list(Old_Obj), StorePid).
 
@@ -229,7 +281,7 @@ do_commit_aux(Tc, [{Name, {_, _, NewValue}} | T], StorePid) ->
 
 %% - Restore all changes made by Tc 
 do_restore(Tc, ObjectsMgrPid, Transactions) ->
-    {value, {_, _, _, Old_Obj}} = gb_trees:lookup(Tc, Transactions),
+    {value, {_, _, _, Old_Obj, _, _}} = gb_trees:lookup(Tc, Transactions),
     do_restore_aux(Tc, dict:to_list(Old_Obj), ObjectsMgrPid).
 
 do_restore_aux(_, [], _) ->
@@ -251,7 +303,7 @@ do_restore_aux(Tc, [{Name, {OldTs, OldValue, _}}|T], MgrPid) ->
 %% - Check all conditions to see if we can commit/abort Tc
 do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) ->
     %% Check status of Tc. If aborted: Delete Tc from tree. Otherwise try to commit.
-    {value, {Client, Status, Deps, Old_Obj}} = gb_trees:lookup(Tc, Transactions),
+    {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
   
     case (Status =:= 'aborted') of
         true ->
@@ -271,7 +323,8 @@ do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) ->
                         true ->
                             io:format("\t\tConfirm: t.~p must wait~n", [Tc]),
                             %% Change status of Tc to 'waiting'
-                            TransactionsWait = gb_trees:enter(Tc, {Client, 'waiting', Deps, Old_Obj}, Transactions),
+                            TransactionsWait = gb_trees:enter(Tc, {Client, 'waiting', Deps, Old_Obj, Next, Resend}, 
+                                                              Transactions),
                             {TransactionsWait, must_wait};
                         false ->
                             %% If any transaction Tc depended on aborted: Tc must abort
@@ -279,7 +332,8 @@ do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) ->
                                 true ->
                                     io:format("\t\tConfirm: t.~p must abort because of dependencies~n", [Tc]),
                                     %% Change status of Tc to 'aborted'
-                                    UpdatedTransactions2 = gb_trees:enter(Tc, {Client, 'aborted', Deps, Old_Obj}, 
+                                    UpdatedTransactions2 = gb_trees:enter(Tc, 
+                                                                          {Client, 'aborted', Deps, Old_Obj, Next, Resend}, 
                                                                           Transactions),
                                     %% Abort Tc
                                     %% Restore original values and timestamps to modified variable
@@ -338,7 +392,7 @@ object_manager(ServerPid, Objects) ->
 %% with the status 'Status'. If there at least one returns true,
 %% false otherwise
 check_deps(Tc, Transactions, Status) ->
-    {value, {_, _, Deps, _}} = gb_trees:lookup(Tc, Transactions),
+    {value, {_, _, Deps, _, _, _}} = gb_trees:lookup(Tc, Transactions),
     check_deps_aux(Status, dict:to_list(Deps)).
 
 check_deps_aux(_, []) ->
@@ -372,10 +426,10 @@ propagate_event(Tc, Status, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) -
                     %% Transaction doesn't exist anymore. Ignore
                     %%io:format("Propagate: Dependency has been deleted. Ignoring~n"),
                     propagate_event(Tc, Status, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions);
-                {value, {C, S, Deps, Old_Obj}} ->
+                {value, {C, S, Deps, Old_Obj, Next, Resend}} ->
                     %% Update dependencies of First_Dep
                     Up_Deps = dict:store(Tc, Status, Deps),
-                    Up_Transactions = gb_trees:enter(First_Dep, {C, S, Up_Deps, Old_Obj}, Transactions),
+                    Up_Transactions = gb_trees:enter(First_Dep, {C, S, Up_Deps, Old_Obj, Next, Resend}, Transactions),
                     %% Attempt to commit First_Dep only if its already 'waiting'
                     case (S =:= 'waiting') of
                         true ->
