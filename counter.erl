@@ -35,8 +35,8 @@ set(Counter,Val) ->
 value(Counter) ->
     Counter ! {self(), value},
     receive
-	{Counter, Value} ->
-	    Value
+	{Counter, value} ->
+	    value
     end.
 
 %% Stop counter 

@@ -230,14 +230,14 @@ do_read(Ts, VName, Transactions, ObjectsMgrPid, DepsMgrPid) ->
                     %% No dependency to add
                     %%io:format("Reading ~p. No dependencies to add~n", [VName]),
                     %% Update RTS of the variable to max(RTS, Ts)
-                    ObjectsMgrPid ! {updateObject, VName, {VValue, max(RTS, Ts), WTS}},
+                    ObjectsMgrPid ! {updateObject, VName, {VValue, my_max(RTS, Ts), WTS}},
                     {Transactions, continue};
                 {value, {_, S, _, _, _, _}} ->
                     case (WTS =:= Ts) of
                         true ->
                             %% A transaction should not depend on itself
                             %% Update RTS of the variable to max(RTS, Ts)
-                            ObjectsMgrPid ! {updateObject, VName, {VValue, max(RTS, Ts), WTS}},
+                            ObjectsMgrPid ! {updateObject, VName, {VValue, my_max(RTS, Ts), WTS}},
                             {Transactions, continue};
                         false ->
                             %% Use the current status of the other transaction
@@ -247,12 +247,21 @@ do_read(Ts, VName, Transactions, ObjectsMgrPid, DepsMgrPid) ->
                             %% Save the dependency to the Dependency Dictionary
                             DepsMgrPid ! {enqueue, WTS, Ts},
                             %% Update RTS of the variable to max(RTS, Ts)
-                            ObjectsMgrPid ! {updateObject, VName, {VValue, max(RTS, Ts), WTS}},
+                            ObjectsMgrPid ! {updateObject, VName, {VValue, my_max(RTS, Ts), WTS}},
                             {Up_Transactions, continue}
                     end                        
             end
     end.
       
+%% - Returns the maximum value
+my_max(A, B) ->
+    case A > B of
+        true ->
+            A;
+        false ->
+            B
+    end.
+
 
 %% - Write
 do_write(Ts, VName, New_Value, Transactions, ObjectsMgrPid) ->
