@@ -82,11 +82,11 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
             end;
         {confirm, Client, ConfNumber} -> 
             {Tc,_} = dict:fetch(Client,ClientList),
-            io:format("Received Confirm from client ~p in transacion ~p.~n", [Client, Tc]),
+            io:format("Received Confirm from client ~p in transaction ~p.~n", [Client, Tc]),
             
             %% The server only executes a confirm when it knows that
             %%no messages have been lost before.
-            {value, {Client, _, _, _, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
+            {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
             io:format("ConfNumber = ~p and Next = ~p~n", [ConfNumber, Next]),
             case (ConfNumber =:= Next) of
                 false ->
@@ -95,12 +95,15 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                         false ->
                             %% Send a message to the client asking for resend
                             io:format("Last message has been lost from t.~p. Asking for resend~n", [Tc]),
-                            Client ! {resend, Next, self()};
+                            Client ! {resend, Next, self()},
+                            %% Change the flag to 'sent'
+                            TransactionsCS = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, 
+                                                                 Next, 'sent'}, Transactions),
+                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TransactionsCS);
                         true -> 
                             %% The message has been sent already
-                            ok
-                    end,
-                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
+                    end;                    
                 true ->
                     io:format("Confirm arrived in order for t.~p~n", [Tc]),
                     %% Confirm and handle outcoming status
@@ -136,12 +139,15 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                                 false ->
                                     %% Ask for resend of previous message
                                     io:format("Message has been lost from t.~p. Asking for resend~n", [Tc]),
-                                    Client ! {resend, Next, self()};
+                                    Client ! {resend, Next, self()},
+                                    %% Change the flag to 'sent'
+                                    TransactionsS = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, 
+                                                                        Next, 'sent'}, Transactions),
+                                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TransactionsS);
                                 true -> 
                                     %% The message has been sent already
-                                    ok
-                            end,
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
+                            end;
                         true ->
                             %% Reset the Resend flag and set Next to the next action
                             TransactionsR = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, Next+1, 'not_sent'}, 
@@ -178,37 +184,40 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                             end
                     end
             end
-    %% Changed to handle lost confirm-messages
     after 50000 ->
             case all_gone(ClientList) of
                 true -> exit(normal);    
                 false -> 
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
+
+            %% Confirm messages can not be lost!
                     %% Check if there are still transactions active
-                    case gb_trees:is_empty(Transactions) of
-                        false ->
-                            %% There are transactions with lost confirm messages 
-                            %% Get the timestamps and ask for resend of confirm messages
-                            reconfirm(gb_trees:keys(Transactions), Transactions),
-                            %% Continue execution
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
-                        true ->
-                            %% No transactions left. Continue execution
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
-                    end
+%%                     case gb_trees:is_empty(Transactions) of
+%%                         false ->
+%%                             %% There are transactions with lost confirm messages 
+%%                             %% Get the timestamps and ask for resend of confirm messages
+%%                             reconfirm(gb_trees:keys(Transactions), Transactions),
+%%                             %% Continue execution
+%%                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+%%                         true ->
+%%                             %% No transactions left. Continue execution
+%%                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
+%%                     end
             end
     end.
 
+%% Confirm messages can not be lost
 %% - Sends a message to every client in the list to resend the confirm
 %% message. Assumes they have been waiting long enough so that all the
 %% other messages have been executed.
-reconfirm([], _) ->
-    ok;
-reconfirm([Ts|Keys], Transactions) ->
-    %% Get the owner of the transaction
-    {value, {Client, _, _, __, _, _}} = gb_trees:lookup(Ts, Transactions),
-    %% Send the reconfirm message
-    Client ! {reconfirm, self()},
-    reconfirm(Keys, Transactions).
+%% reconfirm([], _) ->
+%%     ok;
+%% reconfirm([Ts|Keys], Transactions) ->
+%%     %% Get the owner of the transaction
+%%     {value, {Client, _, _, __, _, _}} = gb_trees:lookup(Ts, Transactions),
+%%     %% Send the reconfirm message
+%%     Client ! {reconfirm, self()},
+%%     reconfirm(Keys, Transactions).
 
 
 %% - The values are maintained here
