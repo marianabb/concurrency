@@ -2,7 +2,7 @@
 %% - The counter module creates a counter, its value can be incremented and retrieved.
 -module(counter).
 
--export([start/0, loop/1, increment/1, value/1, stop/1]).
+-export([start/0, loop/1, increment/1, value/1, stop/1, set/2]).
 
 %% Start counter in 1
 start() ->
@@ -15,6 +15,8 @@ loop(Val) ->
 	{From, value} ->
 	    From ! {self(), Val},
 	    loop(Val);
+	{set, Value} ->
+	    loop(Value);
 	stop ->
 	    true;
 	_ ->
@@ -24,6 +26,10 @@ loop(Val) ->
 %% Increment counter by one
 increment(Counter) ->
     Counter ! increment.
+
+%% Set counter 
+set(Counter,Val) ->
+    Counter ! {set, Val}.
 
 %% Retrieve value of counter
 value(Counter) ->
