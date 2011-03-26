@@ -116,8 +116,8 @@ send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator) ->
 	{reconfirm, ServerPid} ->
 	    send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator);
 	{resend, MsgNr, ServerPid} ->
-        counter:set(MsgNrGenerator,MsgNr),
-        send(Window, ServerPid, lists:nthtail(MsgNr-1, Transaction), MsgNrGenerator, Transaction, TrNrGenerator);
+	    counter:set(MsgNrGenerator,MsgNr),
+	    send(Window, ServerPid, lists:nthtail(MsgNr-1, Transaction), MsgNrGenerator, Transaction, TrNrGenerator);
 	{abort, ServerPid} -> 
 	    insert_str(Window, "Aborted... type run if you want to try again!\n"),
 	    connected(Window, ServerPid, TrNrGenerator);
