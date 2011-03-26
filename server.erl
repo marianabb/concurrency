@@ -80,16 +80,33 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                     Client ! {proceed, self()},
                     server_loop(ClientLUpdated,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions)
             end;
-        {confirm, Client} -> 
+        {confirm, Client, ConfNumber} -> 
             {Tc,_} = dict:fetch(Client,ClientList),
             io:format("Received Confirm from client ~p in transacion ~p.~n", [Client, Tc]),
             
-            %% Confirm and handle outcoming status
-            {UpdatedTransactions, Status} = do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions),
-            io:format("Transaction t.~p finished confirm with status ~p~n", [Tc, Status]),
-            StorePid ! {print, self()},
-            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions);
-        
+            %% The server only executes a confirm when it knows that
+            %%no messages have been lost before.
+            {value, {Client, Status, _, _, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
+            case (ConfNumber =:= Next) of
+                false ->
+                    %% We have lost messages. Ask for resend only once
+                    case (Resend =:= 'sent') of
+                        false ->
+                            %% Send a message to the client asking for resend
+                            Client ! {resend, Next, self()};
+                        true -> 
+                            %% The message has been sent already
+                            ok
+                    end,
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                true ->
+                    %% Confirm and handle outcoming status
+                    {UpdatedTransactions, Status} = do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, 
+                                                               Transactions),
+                    io:format("Transaction t.~p finished confirm with status ~p~n", [Tc, Status]),
+                    StorePid ! {print, self()},
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions)
+            end;
         {action, Client, Act, ActNumber} ->
             %% The client sends the actions of the list (the transaction) one by one 
             %% in the order they were entered by the user.
@@ -100,8 +117,11 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
             {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
             case Status of
                 'aborted' ->
-                    %% Everything was handled previously
-                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                    %% Set Next to the next action anyway so that the confirm is accepted later
+                    TransactionsAb = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, Next+1, Resend}, 
+                                                    Transactions),
+                    %% Everything else was handled previously
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TransactionsAb);
                 'going-on' ->
                     %% Only execute actions that come in the right order
                     case (ActNumber =:= Next) of
@@ -110,8 +130,8 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                             %%and ask for resend only once.
                             case (Resend =:= 'sent') of
                                 false ->
-                                    %% Send a message to the client asking for resend
-                                    Client ! {resend, ActNumber, self()};
+                                    %% Ask for resend of previous message
+                                    Client ! {resend, Next, self()};
                                 true -> 
                                     %% The message has been sent already
                                     ok
@@ -153,8 +173,8 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                             end
                     end
             end
-    %% Used to be 50000, changed to handle lost confirm-messages faster
-    after 10000 ->
+    %% Changed to handle lost confirm-messages
+    after 50000 ->
             case all_gone(ClientList) of
                 true -> exit(normal);    
                 false -> 

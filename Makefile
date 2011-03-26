@@ -3,7 +3,7 @@
 .erl.beam:
 	erlc -W $<
 
-MODS = client parser window server
+MODS = client parser window server counter
 
 all: compile
 

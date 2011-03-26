@@ -110,12 +110,13 @@ process(Window, ServerPid, Transaction, TrNr, TrNrGenerator) ->
 
 %% - Sending the transaction and waiting for confirmation
 send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator) ->
-    ServerPid ! {confirm, self()}, %% Once all the list (transaction) items sent, send confirmation
+    %% Once all the list (transaction) items sent, send confirmation
+    ServerPid ! {confirm, self(),length(Transaction) + 1},
     receive	
 	{reconfirm, ServerPid} ->
 	    send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator);
 	{resend, MsgNr, ServerPid} ->
-	    send(Window, ServerPid, lists:nthtail(MsgNr-1, Transaction), counter:set(MsgNrGenerator,MsgNr), Transaction, TrNrGenerator);
+        send(Window, ServerPid, lists:nthtail(MsgNr-1, Transaction), counter:set(MsgNrGenerator,MsgNr), Transaction, TrNrGenerator);
 	{abort, ServerPid} -> 
 	    insert_str(Window, "Aborted... type run if you want to try again!\n"),
 	    connected(Window, ServerPid, TrNrGenerator);
