@@ -32,7 +32,8 @@ disconnected(Window) ->
 	{connected, ServerPid} -> 
 	    insert_str(Window, "Connected to the transaction server\n"),
 	    set_title(Window, "Connected"),
-	    connected(Window, ServerPid);
+	    TrNrGenerator = counter:start(),	    
+	    connected(Window, ServerPid,TrNrGenerator);
 	{'Exit', _, _} -> exit(died);
 	Other -> io:format("client disconnected unexpected:~p~n",[Other]),
 		 disconnected(Window)
@@ -62,52 +63,83 @@ try_to_connect(Parent, Host) ->
 
 
 %%%%%%%%%%%%%%%%%%%%%%% ACTIVE CLIENT %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-connected(Window, ServerPid) ->
+connected(Window, ServerPid, TrNrGenerator) ->
     receive
 	%% - The user has requested a transaction
 	{request, Window, Transaction} ->
+	    TrNr = counter:value(TrNrGenerator), 
+            counter:increment(TrNrGenerator),  
 	    io:format("Client requested the transaction ~p.~n",[Transaction]),
 	    insert_str(Window, "Processing request...\n"),
-	    process(Window, ServerPid, Transaction);
+	    process(Window, ServerPid, Transaction, TrNr, TrNrGenerator);
 	{'EXIT', Window, windowDestroyed} -> end_client(ServerPid);
 	{close, ServerPid} -> exit(serverDied);
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other]),
-	    connected(Window,ServerPid)
+	    connected(Window,ServerPid, TrNrGenerator)
     end.
 
 %% - Asking to process a request
-process(Window, ServerPid, Transaction) ->
-    ServerPid ! {request, self()}, %% Send a request to server and wait for proceed message
+process(Window, ServerPid, Transaction, TrNr, TrNrGenerator) ->
+    ServerPid ! {request, self(), TrNr}, %% Send a request to server and wait for proceed message  
     receive
-	{proceed, ServerPid} -> send(Window, ServerPid, Transaction); %% received green light send the transaction.
+	{proceed, ServerPid} -> 
+	    MsgNrGenerator = counter:start(),
+	    send(Window, ServerPid, Transaction, MsgNrGenerator, Transaction, TrNrGenerator); %% received green light send the transaction.
 	{close, ServerPid} -> exit(serverDied);
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other])
+    after 5000 ->
+	    io:format("request lost?, resend request to the server"),
+	    process(Window, ServerPid, Transaction, TrNr, TrNrGenerator)
     end.
 
+%% Not needed anymore
+%% flush() ->
+%%     receive
+%% 	{proceed, _} ->si
+%% 	    flush();
+%% 	{close, _} ->
+%% 	    flush();
+%% 	Other ->
+%% 	    io:format("client active unexpected: ~p~n",[Other]),
+%% 	    flush()
+%%     after 0 ->
+%% 	    true
+%%     end.
+
 %% - Sending the transaction and waiting for confirmation
-send(Window, ServerPid, []) ->
+send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator) ->
     ServerPid ! {confirm, self()}, %% Once all the list (transaction) items sent, send confirmation
-    receive
-	{abort, ServerPid} -> insert_str(Window, "Aborted... type run if you want to try again!\n"),
-		       connected(Window, ServerPid);
-	{committed, ServerPid} -> insert_str(Window, "Transaction succeeded!\n"),
-			  connected(Window, ServerPid);
-	{'EXIT', Window, windowDestroyed} -> end_client(ServerPid);
+    receive	
+	{reconfirm, ServerPid} ->
+	    send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator);
+	{resend, MsgNr, ServerPid} ->
+	    send(Window, ServerPid, lists:nthtail(MsgNr-1, Transaction), counter:set(MsgNrGenerator,MsgNr), Transaction, TrNrGenerator);
+	{abort, ServerPid} -> 
+	    insert_str(Window, "Aborted... type run if you want to try again!\n"),
+	    connected(Window, ServerPid, TrNrGenerator);
+	{committed, ServerPid} -> 
+	    insert_str(Window, "Transaction succeeded!\n"),
+	    connected(Window, ServerPid, TrNrGenerator);
+	{'EXIT', Window, windowDestroyed} -> 
+	    end_client(ServerPid);
 	{close, ServerPid} -> 
 	    exit(serverDied);
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other])
     end;
-send(Window, ServerPid, [H|T]) -> 
+send(Window, ServerPid, [H|T], MsgNrGenerator, Transaction, TrNrGenerator) -> 
     sleep(3), 
-    case loose(0) of
+    case loose(6) of
 	%% In order to handle losses, think about adding an extra field to the message sent
-	false -> ServerPid ! {action, self(), H}; 
+	false -> 
+	    MsgNr = counter:value(MsgNrGenerator), 
+            counter:increment(MsgNrGenerator),  
+	    ServerPid ! {action, self(), H, MsgNr}; 
         true -> ok
     end,
-    send(Window, ServerPid, T).
+    send(Window, ServerPid, T, MsgNrGenerator, Transaction, TrNrGenerator).
 %%%%%%%%%%%%%%%%%%%%%%% Active Window %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
