@@ -82,23 +82,22 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
             end;
         {confirm, Client, ConfNumber} -> 
             {Tc,_} = dict:fetch(Client,ClientList),
-            io:format("Received Confirm from client ~p in transaction ~p.~n", [Client, Tc]),
+            %%io:format("Received Confirm from client ~p in transaction ~p.~n", [Client, Tc]),
             
             %% The server only executes a confirm when all other messages
             %%have been received
             {value, {Client, Status, Deps, Old_Obj, Next, _}} = gb_trees:lookup(Tc, Transactions),
-            io:format("ConfNumber = ~p and Next = ~p~n", [ConfNumber, Next]),
+            %%io:format("ConfNumber = ~p and Next = ~p~n", [ConfNumber, Next]),
             case (ConfNumber =:= Next) of
                 false ->
                     %% We have lost messages. Ask for resend.
                     %% We always ask for resend if the message is a confirm unless Tc was aborted before.
                     case (Status =:= 'aborted') of
                         true ->
-                            io:format("ABORTED~n"),
                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
                         false ->
                             %% Send a message to the client asking for resend
-                            io:format("Confirm but message has been lost from t.~p. Asking for resend~n", [Tc]),
+                            io:format("Confirm but message ~p has been lost from t.~p. Asking for resend~n", [Next,Tc]),
                             Client ! {resend, Next, self()},
                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
                     end;                   
@@ -111,7 +110,7 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                             %% Reset the Resend flag
                             TransactionsR = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, Next, 'not_sent'}, 
                                                            Transactions),
-                            io:format("Confirm arrived in order for t.~p~n", [Tc]),
+                            io:format("Received confirm in order for t.~p~n", [Tc]),
                             %% Confirm and handle outcoming status
                             {UpdatedTransactions, St} = do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, 
                                                                    TransactionsR),
@@ -124,7 +123,7 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
             %% The client sends the actions of the list (the transaction) one by one 
             %% in the order they were entered by the user.
             {Tc,_} = dict:fetch(Client,ClientList),
-            io:format("Received ~p from client ~p in transaction ~p.~n", [Act, Client, Tc]),
+            %%io:format("Received ~p from client ~p in transaction ~p.~n", [Act, Client, Tc]),
             
             %% Check status of Tc. If aborted: do nothing. Otherwise continue execution.                    
             {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
@@ -149,7 +148,7 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                     end;
                 'going-on' ->
                     %% Only execute actions that come in the right order
-                    io:format("ActNumber = ~p and Next = ~p~n", [ActNumber, Next]),
+                    %%io:format("ActNumber = ~p and Next = ~p~n", [ActNumber, Next]),
                     case (ActNumber =:= Next) of
                         false ->
                             %% If the action is not the one the server expects: Ignore it
@@ -157,7 +156,7 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                             case (Resend =:= 'sent') of
                                 false ->
                                     %% Ask for resend of previous message
-                                    io:format("Message has been lost from t.~p. Asking for resend~n", [Tc]),
+                                    io:format("Message ~p has been lost from t.~p. Asking for resend~n", [Next,Tc]),
                                     Client ! {resend, Next, self()},
                                     %% Change the flag to 'sent'
                                     TransactionsS = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, 
@@ -171,7 +170,7 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                             %% Reset the Resend flag and set Next to the next action
                             TransactionsR = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, Next+1, 'not_sent'}, 
                                                            Transactions),
-                            
+                            io:format("Received ~p from client ~p in transaction ~p.~n", [Act, Client, Tc]),
                             %% We can proceed with normal execution                            
                             {UpdatedTransactions, Result} = 
                                 case Act of
@@ -208,35 +207,8 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                 true -> exit(normal);    
                 false -> 
                     server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
-
-            %% Confirm messages can not be lost!
-                    %% Check if there are still transactions active
-%%                     case gb_trees:is_empty(Transactions) of
-%%                         false ->
-%%                             %% There are transactions with lost confirm messages 
-%%                             %% Get the timestamps and ask for resend of confirm messages
-%%                             reconfirm(gb_trees:keys(Transactions), Transactions),
-%%                             %% Continue execution
-%%                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
-%%                         true ->
-%%                             %% No transactions left. Continue execution
-%%                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
-%%                     end
             end
     end.
-
-%% Confirm messages can not be lost
-%% - Sends a message to every client in the list to resend the confirm
-%% message. Assumes they have been waiting long enough so that all the
-%% other messages have been executed.
-%% reconfirm([], _) ->
-%%     ok;
-%% reconfirm([Ts|Keys], Transactions) ->
-%%     %% Get the owner of the transaction
-%%     {value, {Client, _, _, __, _, _}} = gb_trees:lookup(Ts, Transactions),
-%%     %% Send the reconfirm message
-%%     Client ! {reconfirm, self()},
-%%     reconfirm(Keys, Transactions).
 
 
 %% - The values are maintained here
@@ -382,8 +354,7 @@ do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) ->
         true ->
             %% The abort message has already been sent and the Old timestamps managed
             %% Must delete Tc from Transactions
-            io:format("\t\tConfirm: Transaction ~p is done by abortion. Will be deleted~n", [Tc]),
-            %%TransactionsAbort = gb_trees:delete(Tc, Transactions),
+            io:format("\t\tConfirm: Transaction ~p is done by abortion~n", [Tc]),
             {Transactions, aborted};
         false ->
             case ((Status =:= 'going-on') or (Status =:= 'waiting')) of
@@ -417,8 +388,7 @@ do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) ->
                                     PropagatedT = propagate_event(Tc,'aborted',ObjectsMgrPid,DepsMgrPid,
                                                     StorePid,UpdatedTransactions2),
                                     %% Its safe to delete Tc here
-                                    io:format("\t\tConfirm: Transaction ~p is done by abortion. Will be deleted~n", [Tc]),
-                                    %%UpdatedTransactions3 = gb_trees:delete_any(Tc, PropagatedT),
+                                    io:format("\t\tConfirm: Transaction ~p is done by abortion.~n", [Tc]),
                                     {PropagatedT, aborted_deps};
                                 false ->
                                     io:format("\t\tConfirm: t.~p can commit~n", [Tc]),
@@ -433,16 +403,14 @@ do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) ->
                                     PropagatedCT = propagate_event(Tc,'committed',ObjectsMgrPid,DepsMgrPid,
                                                                    StorePid,TransactionsCommit),
                                     %% Delete Tc
-                                    io:format("\t\tConfirm: Transaction ~p is done by commitment. Will be deleted~n", 
-                                              [Tc]),
-                                    %%TransactionsCommit = gb_trees:delete_any(Tc, PropagatedCT),
+                                    io:format("\t\tConfirm: Transaction ~p is done by commitment.~n", [Tc]),
                                     {PropagatedCT, committed}
                             end
                     end;
                 false ->
                     %% There is no other state possible. This should not occur.
-                    io:format("Warning: Transaction t~p has status other than 'going-on', 'waiting' or 'aborted'", [Tc])
-            
+                    io:format("Warning: Transaction t~p has status other than 'going-on', 'waiting' or 'aborted'~n", 
+                              [Tc])
             end
     
     end.
@@ -489,18 +457,18 @@ propagate_event(Tc, Status, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) -
     DepsMgrPid ! {dequeue, Tc},
     receive
         no_deps ->
-            io:format("\tPropagate: All dependencies have been checked~n"),
+            %%io:format("\tPropagate: All dependencies have been checked~n"),
             %% No more dependencies. Queue has been deleted.
             %% Return Transactions
-            io:format("Transactions after propagation: ~p~n", [Transactions]),
+            %%io:format("Transactions after propagation: ~p~n", [Transactions]),
             Transactions;
         {dependency, First_Dep} ->
-            io:format("\tPropagate: Checking dependency ~p of t.~p~n", [First_Dep, Tc]),
+            %%io:format("\tPropagate: Checking dependency ~p of t.~p~n", [First_Dep, Tc]),
             %% Update status of Tc in this dependent transaction
             case gb_trees:lookup(First_Dep, Transactions) of
                 none ->
                     %% Transaction doesn't exist anymore. Ignore
-                    io:format("\tPropagate: Dependency has been deleted. Ignoring~n"),
+                    %%io:format("\tPropagate: Dependency has been deleted. Ignoring~n"),
                     propagate_event(Tc, Status, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions);
                 {value, {C, S, Deps, Old_Obj, Next, Resend}} ->
                     %% Update dependencies of First_Dep
@@ -518,8 +486,7 @@ propagate_event(Tc, Status, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) -
                         false ->
                             %% Don't do anything unless the transaction is waiting
                             %% Continue propagation until the Tc queue is empty
-                            io:format("\tPropagate: t.~p was not waiting. Continue with queue of ~p~n", 
-                                      [First_Dep, Tc]),
+                            %%io:format("\tPropagate: t.~p was not waiting. Continue with ~p queue~n",[First_Dep, Tc]),
                             propagate_event(Tc, Status, ObjectsMgrPid, DepsMgrPid, StorePid, Up_Transactions)
                     end
             
