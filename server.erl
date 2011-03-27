@@ -132,6 +132,9 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                 'waiting' ->
                     %% Tc is done and waiting for another transaction. Continue execution.
                     server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                'committed' ->
+                    %% Tc is done and committed. Continue execution.
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
                 'aborted' ->
                     %% Set Next to the next action anyway so that the confirm is accepted later,
                     %%but only if the action is being received for the first time
