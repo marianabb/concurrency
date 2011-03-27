@@ -451,7 +451,7 @@ check_deps_aux(Status, [{_, DepStatus}|L]) ->
             check_deps_aux(Status, L)
     end.
 
-%% - Propagates abort/commit events on the dependencies
+%% - Propagates abort/commit events on the dependencies of Tc
 propagate_event(Tc, Status, ObjectsMgrPid, DepsMgrPid, StorePid, Transactions) ->
     io:format("\tPropagate: Event ~p of t.~p will be propagated~n", [Status, Tc]),
     DepsMgrPid ! {dequeue, Tc},

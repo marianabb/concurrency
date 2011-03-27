@@ -123,8 +123,8 @@ send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator, Attempt)
 	    exit(serverDied);
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other])
-    %% If the server has not received response then messages have been lost.
-    %%Re-send confirm.
+    %% If the client has not received response then messages have been lost.
+    %% Re-send confirm.
     after 6000 ->
             send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator, Attempt)
     end;
