@@ -84,8 +84,8 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
             {Tc,_} = dict:fetch(Client,ClientList),
             io:format("Received Confirm from client ~p in transaction ~p.~n", [Client, Tc]),
             
-            %% The server only executes a confirm when it knows that
-            %%no messages have been lost before.
+            %% The server only executes a confirm when all other messages
+            %%have been received
             {value, {Client, Status, Deps, Old_Obj, Next, Resend}} = gb_trees:lookup(Tc, Transactions),
             io:format("ConfNumber = ~p and Next = ~p~n", [ConfNumber, Next]),
             case (ConfNumber =:= Next) of
@@ -93,22 +93,33 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                     %% We have lost messages. Ask for resend only once
                     case (Resend =:= 'sent') of
                         false ->
-                            %% Send a message to the client asking for resend
-                            io:format("Last message has been lost from t.~p. Asking for resend~n", [Tc]),
-                            Client ! {resend, Next, self()},
-                            %% Change the flag to 'sent'
-                            TransactionsCS = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, 
-                                                                 Next, 'sent'}, Transactions),
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TransactionsCS);
+                            %% If the transaction is aborted nothing should be done
+                            case (Status =:= 'aborted') of
+                                true ->
+                                    io:format("ABORTED~n"),
+                                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
+                                false ->
+                                    %% Send a message to the client asking for resend
+                                    io:format("Confirm but message has been lost from t.~p. Asking for resend~n", [Tc]),
+                                    Client ! {resend, Next, self()},
+                                    %% Change the flag to 'sent'
+                                    TransactionsCS = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, 
+                                                                         Next, 'not_sent'}, Transactions),
+                                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TransactionsCS)
+                            end;
                         true -> 
                             %% The message has been sent already
+                            io:format("RESEND SENT~n"),
                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
                     end;                    
                 true ->
+                    %% Reset the Resend flag
+                    TransactionsR = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, Next, 'not_sent'}, 
+                                                   Transactions),
                     io:format("Confirm arrived in order for t.~p~n", [Tc]),
                     %% Confirm and handle outcoming status
                     {UpdatedTransactions, St} = do_confirm(Tc, ObjectsMgrPid, DepsMgrPid, StorePid, 
-                                                               Transactions),
+                                                               TransactionsR),
                     io:format("Transaction t.~p finished confirm with status ~p~n", [Tc, St]),
                     StorePid ! {print, self()},
                     server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions)
@@ -142,7 +153,7 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                                     Client ! {resend, Next, self()},
                                     %% Change the flag to 'sent'
                                     TransactionsS = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, 
-                                                                        Next, 'sent'}, Transactions),
+                                                                        Next, 'not_sent'}, Transactions),
                                     server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TransactionsS);
                                 true -> 
                                     %% The message has been sent already
