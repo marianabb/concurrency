@@ -50,11 +50,19 @@ First Task: Concurrency Control Solution:
   
 Second Task: Handling Lost Messages:
 ------------------------------------
+The handling is done by enumerating the messages on the client side and
+checking for the correct order on the server side. This solution
+guarantees that all messages will eventually be processed by the server
+but there might be some redundant messages that will not be used.
+Note that if the loss of messages is high, it is possible that we might
+have to wait some time before the transactions are done (since the client
+waits 6 seconds after is has sent a confirm message to resend it again).
+
+
 The following changes were added in order to handle loss of messages:
 * Client Side:
   - The action messages now include a number that indicates its order
-  inside each transaction and a variable that indicates if this is the
-  first attempt of sending this message or a re-sending.
+  inside each transaction.
   - The client now receives a message {resend, MsgNr, ServerPid}. After
   this message is received the client must re-send all the actions
   starting from the one at position MsgNr to the server.

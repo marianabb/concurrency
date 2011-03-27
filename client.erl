@@ -86,7 +86,7 @@ process(Window, ServerPid, Transaction, TrNr, TrNrGenerator) ->
 	{proceed, ServerPid} -> 
 	    MsgNrGenerator = counter:start(),
         %% received green light send the transaction.
-	    send(Window, ServerPid, Transaction, MsgNrGenerator, Transaction, TrNrGenerator, 'first'); 
+	    send(Window, ServerPid, Transaction, MsgNrGenerator, Transaction, TrNrGenerator); 
 	{close, ServerPid} -> exit(serverDied);
 	Other ->
 	    io:format("client active unexpected: ~p~n",[Other])
@@ -97,7 +97,7 @@ process(Window, ServerPid, Transaction, TrNr, TrNrGenerator) ->
 
 
 %% - Sending the transaction and waiting for confirmation
-send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator, Attempt) ->
+send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator) ->
     %% Once all the list (transaction) items sent, send confirmation
     io:format("Sending confirmation number ~p~n", [length(Transaction)+1]),
     ServerPid ! {confirm, self(),length(Transaction) + 1},
@@ -106,7 +106,7 @@ send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator, Attempt)
         io:format("Server requested resend of action number ~p~n", [MsgNr]),
 	    counter:set(MsgNrGenerator,MsgNr),
 	    send(Window, ServerPid, lists:nthtail(MsgNr-1, Transaction), MsgNrGenerator, 
-             Transaction, TrNrGenerator,'not-first');
+             Transaction, TrNrGenerator);
 	{abort, ServerPid} -> 
 	    insert_str(Window, "Aborted... type run if you want to try again!\n"),
         counter:set(MsgNrGenerator,1),
@@ -126,9 +126,9 @@ send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator, Attempt)
     %% If the client has not received response then messages have been lost.
     %% Re-send confirm.
     after 6000 ->
-            send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator, Attempt)
+            send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator)
     end;
-send(Window, ServerPid, [H|T], MsgNrGenerator, Transaction, TrNrGenerator, Attempt) -> 
+send(Window, ServerPid, [H|T], MsgNrGenerator, Transaction, TrNrGenerator) -> 
     sleep(3), 
     case loose(3) of
         %% In order to handle losses, think about adding an extra field to the message sent
@@ -136,13 +136,13 @@ send(Window, ServerPid, [H|T], MsgNrGenerator, Transaction, TrNrGenerator, Attem
             MsgNr = counter:value(MsgNrGenerator), 
             counter:increment(MsgNrGenerator), 
             io:format("Sending action ~p with number ~p~n",[H, MsgNr]),
-            ServerPid ! {action, self(), H, MsgNr, Attempt};
+            ServerPid ! {action, self(), H, MsgNr};
         true -> 
             io:format("The action ~p will be lost~n", [H]),
             %% Increment counter as is the message was delivered
             counter:increment(MsgNrGenerator)
     end,
-    send(Window, ServerPid, T, MsgNrGenerator, Transaction, TrNrGenerator, Attempt).
+    send(Window, ServerPid, T, MsgNrGenerator, Transaction, TrNrGenerator).
 %%%%%%%%%%%%%%%%%%%%%%% Active Window %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 

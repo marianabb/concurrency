@@ -119,7 +119,7 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                             server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,UpdatedTransactions)
                     end
             end;
-        {action, Client, Act, ActNumber, Attempt} ->
+        {action, Client, Act, ActNumber} ->
             %% The client sends the actions of the list (the transaction) one by one 
             %% in the order they were entered by the user.
             {Tc,_} = dict:fetch(Client,ClientList),
@@ -135,17 +135,8 @@ server_loop(ClientList, StorePid, ObjectsMgrPid, DepsMgrPid, TSGenerator, Transa
                     %% Tc is done and committed. Continue execution.
                     server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
                 'aborted' ->
-                    %% Set Next to the next action anyway so that the confirm is accepted later,
-                    %%but only if the action is being received for the first time
-                    case Attempt of
-                        'first' ->
-                            TransactionsAb = gb_trees:enter(Tc, {Client, Status, Deps, Old_Obj, Next+1, Resend}, 
-                                                            Transactions),
-                            %% Everything else was handled previously
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,TransactionsAb);
-                        'not-first' ->
-                            server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions)
-                    end;
+                    %% Tc is done by abortion. Continue execution.
+                    server_loop(ClientList,StorePid,ObjectsMgrPid,DepsMgrPid,TSGenerator,Transactions);
                 'going-on' ->
                     %% Only execute actions that come in the right order
                     %%io:format("ActNumber = ~p and Next = ~p~n", [ActNumber, Next]),
