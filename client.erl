@@ -130,7 +130,7 @@ send(Window, ServerPid, [], MsgNrGenerator, Transaction, TrNrGenerator, Attempt)
     end;
 send(Window, ServerPid, [H|T], MsgNrGenerator, Transaction, TrNrGenerator, Attempt) -> 
     sleep(3), 
-    case loose(6) of
+    case loose(3) of
         %% In order to handle losses, think about adding an extra field to the message sent
         false -> 
             MsgNr = counter:value(MsgNrGenerator), 
